@@ -1,7 +1,8 @@
 import {
   VERT, ADVECT, SPLAT, DIVERGENCE, JACOBI, GRADIENT_SUBTRACT, BOUNDARY, DISPLAY, WAVE, VERT3D, FRAG3D,
+  BOAT_STATE, VERT_BOAT, FRAG_BOAT,
 } from './shaders';
-import { Mat4, perspective, lookAt, multiply } from './mat4';
+import { Mat4, perspective, lookAt, multiply, ortho } from './mat4';
 
 // ---------- WebGL setup ----------
 const canvas = document.getElementById('c') as HTMLCanvasElement;
@@ -57,10 +58,11 @@ function compile(type: number, src: string): WebGLShader {
 class Program {
   prog: WebGLProgram;
   uniforms = new Map<string, WebGLUniformLocation>();
-  constructor(frag: string, vert: string = VERT) {
+  constructor(frag: string, vert: string = VERT, attribs: string[] = ['aPos']) {
     const p = G.createProgram()!;
     G.attachShader(p, compile(G.VERTEX_SHADER, vert));
     G.attachShader(p, compile(G.FRAGMENT_SHADER, frag));
+    attribs.forEach((name, i) => G.bindAttribLocation(p, i, name));
     G.linkProgram(p);
     if (!G.getProgramParameter(p, G.LINK_STATUS)) throw new Error(G.getProgramInfoLog(p) ?? 'link error');
     this.prog = p;
@@ -113,6 +115,49 @@ function buildMesh(nx: number, ny: number) {
   G.bindVertexArray(quadVao);
 }
 
+// Boat: low-poly hull + deck + cabin, flat shaded. Local frame: x forward, y starboard, z up.
+const boatVao = G.createVertexArray()!;
+let boatVertCount = 0;
+function buildBoat() {
+  const v: number[] = [];
+  type P = [number, number, number];
+  const tri = (a: P, b: P, c: P, col: P) => { for (const q of [a, b, c]) v.push(...q, ...col); };
+  const quad = (a: P, b: P, c: P, d: P, col: P) => { tri(a, b, c, col); tri(a, c, d, col); };
+  const HULL: P = [0.62, 0.16, 0.12], DECK: P = [0.85, 0.70, 0.45], CABIN: P = [0.95, 0.95, 0.92], ROOF: P = [0.35, 0.38, 0.42];
+  const N = 14, G0 = 0.14; // gunwale height
+  const sect = (i: number) => {
+    const t = i / N;                           // 0 = stern, 1 = bow
+    const x = -0.5 + t;
+    const w = 0.30 * Math.pow(Math.sin(Math.PI * (0.12 + 0.88 * t * 0.92)), 0.7) * (1 - 0.25 * t * t);
+    const k = 0.14 * (0.6 + 0.4 * Math.sin(Math.PI * t)) * (1 - 0.6 * t * t * t);
+    return { L: [x, -w, G0] as P, R: [x, w, G0] as P, K: [x, 0, -k] as P };
+  };
+  const secs = Array.from({ length: N + 1 }, (_, i) => sect(i));
+  for (let i = 0; i < N; i++) {
+    const a = secs[i], b = secs[i + 1];
+    quad(a.L, a.K, b.K, b.L, HULL);
+    quad(a.R, b.R, b.K, a.K, HULL);
+    quad(a.L, b.L, b.R, a.R, DECK);
+  }
+  const st = secs[0]; tri(st.L, st.R, st.K, HULL); // transom
+  // Cabin box
+  const x0 = -0.22, x1 = 0.08, y = 0.15, z0 = G0, z1 = 0.34;
+  quad([x0, -y, z0], [x1, -y, z0], [x1, -y, z1], [x0, -y, z1], CABIN);
+  quad([x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0], CABIN);
+  quad([x1, -y, z0], [x1, y, z0], [x1, y, z1], [x1, -y, z1], CABIN);
+  quad([x0, -y, z0], [x0, -y, z1], [x0, y, z1], [x0, y, z0], CABIN);
+  quad([x0, -y, z1], [x1, -y, z1], [x1, y, z1], [x0, y, z1], ROOF);
+  G.bindVertexArray(boatVao);
+  const buf = G.createBuffer()!;
+  G.bindBuffer(G.ARRAY_BUFFER, buf);
+  G.bufferData(G.ARRAY_BUFFER, new Float32Array(v), G.STATIC_DRAW);
+  G.enableVertexAttribArray(0); G.vertexAttribPointer(0, 3, G.FLOAT, false, 24, 0);
+  G.enableVertexAttribArray(1); G.vertexAttribPointer(1, 3, G.FLOAT, false, 24, 12);
+  boatVertCount = v.length / 6;
+  G.bindVertexArray(quadVao);
+}
+buildBoat();
+
 // ---------- Framebuffers ----------
 interface FBO { tex: WebGLTexture; fb: WebGLFramebuffer; w: number; h: number; attach(unit: number): number; }
 interface DoubleFBO { read: FBO; write: FBO; w: number; h: number; swap(): void; }
@@ -164,16 +209,21 @@ const pGrad = new Program(GRADIENT_SUBTRACT);
 const pBound = new Program(BOUNDARY);
 const pWave = new Program(WAVE);
 const pDisplay = new Program(DISPLAY);
-const pMesh = new Program(FRAG3D, VERT3D);
+const pMesh = new Program(FRAG3D, VERT3D, ['aUv']);
+const pBoatState = new Program(BOAT_STATE);
+const pBoat = new Program(FRAG_BOAT, VERT_BOAT, ['aPos', 'aCol']);
 
 // ---------- State ----------
 let velocity!: DoubleFBO, pressure!: DoubleFBO, divergence!: FBO, viscB!: FBO, dye!: DoubleFBO;
+const boatState = createDoubleFBO(1, 1);
+const BOAT_SCALE = 0.26;
 let simW = 0, simH = 0, dyeW = 0, dyeH = 0;
 let aspect = 1;
 
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
   const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
+  if (w === 0 || h === 0) return; // not laid out yet; try again next frame
   if (canvas.width === w && canvas.height === h && velocity) return;
   canvas.width = w; canvas.height = h;
   aspect = w / h;
@@ -198,6 +248,15 @@ const viscSlider = $<HTMLInputElement>('visc');
 const viscOut = $<HTMLOutputElement>('viscOut');
 const splatSlider = $<HTMLInputElement>('splat');
 const heightSlider = $<HTMLInputElement>('height');
+const speedSlider = $<HTMLInputElement>('speed');
+const speedOut = $<HTMLOutputElement>('speedOut');
+const boatBtn = $<HTMLButtonElement>('boat');
+let showBoat = true;
+boatBtn.addEventListener('click', () => { showBoat = !showBoat; boatBtn.classList.toggle('active', showBoat); });
+function speedFactor() { return Number(speedSlider.value) / 100; }
+function updateSpeedLabel() { speedOut.value = speedFactor().toFixed(1) + 'x'; }
+speedSlider.addEventListener('input', updateSpeedLabel);
+updateSpeedLabel();
 const dampButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('#damp button'));
 const viewButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('#view button'));
 const hint = $<HTMLDivElement>('hint');
@@ -228,8 +287,9 @@ viewButtons.forEach((b) => b.addEventListener('click', () => {
     : 'Drag with the mouse (or touch) to push the water. Walls reflect.';
 }));
 function clearAll() {
-  for (const f of [velocity.read, velocity.write, pressure.read, pressure.write, divergence, viscB, dye.read, dye.write]) {
-    G.bindFramebuffer(G.FRAMEBUFFER, f.fb); G.clear(G.COLOR_BUFFER_BIT);
+  for (const f of [velocity.read, velocity.write, pressure.read, pressure.write, divergence, viscB, dye.read, dye.write,
+    boatState.read, boatState.write]) {
+    G.bindFramebuffer(G.FRAMEBUFFER, f.fb); G.clearColor(0, 0, 0, 0); G.clear(G.COLOR_BUFFER_BIT);
   }
 }
 $('reset').addEventListener('click', clearAll);
@@ -326,7 +386,7 @@ canvas.addEventListener('wheel', (e) => {
 // ---------- Simulation step ----------
 function splat(x: number, y: number, dx: number, dy: number) {
   const radius = (Number(splatSlider.value) / 100) * 0.01 + 0.0004;
-  const force = 1800;
+  const force = 1400;
   const speed = Math.hypot(dx, dy);
 
   pSplat.use().v2('uTexel', 1 / simW, 1 / simH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
@@ -335,12 +395,14 @@ function splat(x: number, y: number, dx: number, dy: number) {
 
   // Push the surface down where the finger moves; the wave equation turns it into ripples.
   pSplat.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
-    .tex('uTarget', dye.read.attach(0)).v3('uValue', -Math.min(speed * 30, 1.0), 0, 0);
+    .tex('uTarget', dye.read.attach(0)).v3('uValue', -Math.min(speed * 8, 0.3), 0, 0);
   blit(dye.write); dye.swap();
 }
 
-function step(dt: number) {
+function step(dt0: number) {
   const tx = 1 / simW, ty = 1 / simH;
+  const sf = speedFactor();
+  const dt = dt0 * sf; // fluid time step
   const [velDamp, waveDamp] = DAMP_LEVELS[dampLevel];
 
   for (const p of pointers.values()) {
@@ -401,19 +463,45 @@ function step(dt: number) {
     .tex('uVelocity', velocity.read.attach(0)).tex('uSource', dye.read.attach(1));
   blit(dye.write); dye.swap();
 
-  // 9. Surface waves: h_tt = c^2 Lap h (explicit, CFL: c^2 dt^2 <= 0.5). The fluid
-  // couples to the surface through advection in step 8.
-  const c2 = Math.min(0.3, 0.4 / Math.max(dt * dt, 1e-3));
-  const wd = waveDamp * (1 - 0.01 * nu); // viscosity also damps the surface a little
-  pWave.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', dt).f('uC2', c2).f('uDamp', wd)
-    .tex('uField', dye.read.attach(0));
-  blit(dye.write); dye.swap();
+  // 8b. Boat: drift with the current, turn toward its motion.
+  pBoatState.use().v2('uTexel', tx, ty).f('uDt', dt).f('uAspect', aspect)
+    .tex('uState', boatState.read.attach(0)).tex('uVelocity', velocity.read.attach(1));
+  blit(boatState.write); boatState.swap();
+
+  // 9. Surface waves: h_tt = c^2 Lap h (explicit, CFL: c^2 dt^2 <= 0.5). Sub-stepped so the
+  // speed slider can raise the wave speed beyond the CFL limit of one step per frame.
+  const subs = Math.max(1, Math.round(2 * sf));
+  const wdt = dt0;
+  const c2 = Math.min(0.3, 0.4 / Math.max(wdt * wdt, 1e-3));
+  const wd = Math.pow(waveDamp * (1 - 0.01 * nu), 1 / subs); // viscosity also damps the surface a little
+  pWave.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', wdt).f('uC2', c2).f('uDamp', wd)
+    .f('uAspect', aspect).f('uBoatSize', showBoat ? BOAT_SCALE * 0.25 : 0.0001)
+    .tex('uBoat', boatState.read.attach(1));
+  for (let i = 0; i < subs; i++) {
+    pWave.tex('uField', dye.read.attach(0));
+    blit(dye.write); dye.swap();
+  }
+}
+
+function drawBoat(vp: Mat4, eye: [number, number, number], heightScale: number) {
+  if (!showBoat) return;
+  pBoat.use().m4('uVP', vp).v2('uTexel', 1 / dyeW, 1 / dyeH).f('uAspect', aspect).f('uHeightScale', heightScale)
+    .f('uScale', BOAT_SCALE).v3('uEye', eye[0], eye[1], eye[2])
+    .tex('uState', boatState.read.attach(0)).tex('uHeight', dye.read.attach(1));
+  G.bindVertexArray(boatVao);
+  G.drawArrays(G.TRIANGLES, 0, boatVertCount);
+  G.bindVertexArray(quadVao);
 }
 
 function render2D(t: number) {
   pDisplay.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uTime', t)
     .tex('uDye', dye.read.attach(0)).tex('uPressure', pressure.read.attach(1)).tex('uVelocity', velocity.read.attach(2));
   blit(null);
+  // Top-down boat: orthographic camera straight above the pool.
+  G.enable(G.DEPTH_TEST);
+  G.clear(G.DEPTH_BUFFER_BIT);
+  drawBoat(ortho(-aspect, aspect, -1, 1, -10, 10), [0, 0, 10], 0.0);
+  G.disable(G.DEPTH_TEST);
 }
 
 function render3D() {
@@ -430,6 +518,7 @@ function render3D() {
   G.bindVertexArray(meshVao);
   G.drawElements(G.TRIANGLES, meshIndexCount, G.UNSIGNED_INT, 0);
   G.bindVertexArray(quadVao);
+  drawBoat(viewProj(), eye, heightScale);
   G.disable(G.DEPTH_TEST);
 }
 
@@ -438,8 +527,28 @@ function frame(now: number) {
   const dt = Math.min((now - last) / 1000, 1 / 30);
   last = now;
   resize();
+  if (!velocity) { requestAnimationFrame(frame); return; }
   if (!paused) step(dt * 60); // dt in "frames" so velocity is in texels/frame
   if (view3D) render3D(); else render2D(now / 1000);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// Debug readback (dev only): sample the sim textures.
+(window as unknown as { __dbg: () => unknown }).__dbg = () => {
+  const rd = (f: FBO, x: number, y: number) => {
+    G.bindFramebuffer(G.FRAMEBUFFER, f.fb);
+    const type = G.getParameter(G.IMPLEMENTATION_COLOR_READ_TYPE) as number;
+    const fmt = G.getParameter(G.IMPLEMENTATION_COLOR_READ_FORMAT) as number;
+    const out = type === G.FLOAT ? new Float32Array(4) : new Uint16Array(4);
+    G.readPixels(x, y, 1, 1, fmt, type, out);
+    return { type, fmt, v: Array.from(out) };
+  };
+  return {
+    boat: rd(boatState.read, 0, 0),
+    velC: rd(velocity.read, simW >> 1, simH >> 1),
+    dyeC: rd(dye.read, dyeW >> 1, dyeH >> 1),
+    dye0: rd(dye.read, 2, 2),
+    cam: { ...cam }, aspect, up: unproject(0.5, 0.6),
+  };
+};

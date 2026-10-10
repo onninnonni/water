@@ -34,6 +34,11 @@
       <output id="viscOut"></output>
     </div>
     <div class="row">
+      <label for="speed">Speed</label>
+      <input id="speed" type="range" min="50" max="300" value="200" />
+      <output id="speedOut"></output>
+    </div>
+    <div class="row">
       <label>View</label>
       <div class="btns" id="view">
         <button data-view="2d" class="active">2D</button>
@@ -58,6 +63,7 @@
       <input id="height" type="range" min="0" max="100" value="40" />
     </div>
     <div class="btns">
+      <button id="boat" class="active">Boat</button>
       <button id="reset">Reset</button>
       <button id="pause">Pause</button>
     </div>

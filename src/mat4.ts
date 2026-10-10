@@ -31,3 +31,10 @@ export function multiply(a: Mat4, b: Mat4): Mat4 {
   }
   return o;
 }
+
+export function ortho(l: number, r: number, b: number, t: number, n: number, f: number): Mat4 {
+  const m = new Float32Array(16);
+  m[0] = 2 / (r - l); m[5] = 2 / (t - b); m[10] = -2 / (f - n);
+  m[12] = -(r + l) / (r - l); m[13] = -(t + b) / (t - b); m[14] = -(f + n) / (f - n); m[15] = 1;
+  return m;
+}

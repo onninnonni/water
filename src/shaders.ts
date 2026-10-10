@@ -146,18 +146,29 @@ void main() {
 // h_tt = c^2 * Lap(h) - damping, with Neumann (reflecting) walls via clamped sampling.
 export const WAVE = HEADER + `
 uniform sampler2D uField;
+uniform sampler2D uBoat;
 uniform float uDt;
 uniform float uC2;
 uniform float uDamp;
+uniform float uAspect;
+uniform float uBoatSize;
 void main() {
   vec2 f = texture(uField, vUv).xy;
+  // Boat wake: push the surface down along the hull in proportion to boat speed.
+  vec4 b = texelFetch(uBoat, ivec2(0), 0);
+  vec2 rel = vUv - b.xy; rel.x *= uAspect;
+  vec2 fwd = vec2(cos(b.z), sin(b.z));
+  vec2 lc = vec2(dot(rel, fwd), dot(rel, vec2(-fwd.y, fwd.x)));
+  float hull = exp(-(lc.x * lc.x / (uBoatSize * uBoatSize) + lc.y * lc.y / (uBoatSize * uBoatSize * 0.12)) * 6.0);
+  f.x -= hull * min(b.w * 60.0, 0.6) * uDt;
   float L = texture(uField, vUv - vec2(uTexel.x, 0.0)).x;
   float R = texture(uField, vUv + vec2(uTexel.x, 0.0)).x;
   float B = texture(uField, vUv - vec2(0.0, uTexel.y)).x;
   float T = texture(uField, vUv + vec2(0.0, uTexel.y)).x;
   float lap = L + R + B + T - 4.0 * f.x;
-  float v = clamp((f.y + uC2 * lap * uDt) * uDamp, -2.0, 2.0);
-  float h = clamp(f.x + v * uDt, -2.0, 2.0);
+  float v = clamp((f.y + uC2 * lap * uDt) * uDamp, -1.0, 1.0);
+  float h = clamp(f.x + v * uDt, -1.0, 1.0);
+  if (isnan(h) || isnan(v)) { h = 0.0; v = 0.0; }
   frag = vec4(h, v, 0.0, 1.0);
 }`;
 
@@ -236,5 +247,89 @@ void main() {
   col += vec3(1.0) * pow(max(dot(n, H), 0.0), 120.0) * 0.8;
   float speed = length(texture(uVelocity, vUv).xy);
   col += vec3(0.15, 0.2, 0.2) * min(speed * 0.05, 0.4);
+  frag = vec4(col, 1.0);
+}`;
+
+// 1x1 boat state texture: xy = position (uv), z = heading, w = speed (uv/frame).
+export const BOAT_STATE = HEADER + `
+uniform sampler2D uState;
+uniform sampler2D uVelocity;
+uniform float uDt;
+uniform float uAspect;
+void main() {
+  vec4 s = texelFetch(uState, ivec2(0), 0);
+  vec2 pos = s.xy;
+  if (pos == vec2(0.0) || any(isnan(s)) || any(isinf(s))) { pos = vec2(0.5); s = vec4(pos, 0.0, 0.0); }
+  vec2 vel = texture(uVelocity, pos).xy * uTexel; // uv per frame
+  vec2 drift = vel * uDt * 0.5;
+  vec2 np = clamp(pos + drift, vec2(0.06), vec2(0.94));
+  float speed = length(np - pos);
+  float heading = s.z;
+  if (speed > 1e-5) {
+    vec2 d = (np - pos); d.x *= uAspect;
+    float target = atan(d.y, d.x);
+    float diff = mod(target - heading + 3.14159265, 6.2831853) - 3.14159265;
+    heading += diff * min(1.0, speed * 400.0) * 0.15;
+  }
+  frag = vec4(np, heading, speed);
+}`;
+
+export const VERT_BOAT = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec3 aPos;
+in vec3 aCol;
+uniform sampler2D uState;
+uniform sampler2D uHeight;
+uniform mat4 uVP;
+uniform vec2 uTexel;
+uniform float uAspect;
+uniform float uHeightScale;
+uniform float uScale;
+out vec3 vCol;
+out vec3 vWorld;
+vec3 world(vec2 uv) {
+  float h = texture(uHeight, uv).x;
+  return vec3((uv.x - 0.5) * 2.0 * uAspect, (uv.y - 0.5) * 2.0, h * uHeightScale);
+}
+void main() {
+  vec4 s = texelFetch(uState, ivec2(0), 0);
+  vec2 uv = s.xy;
+  float heading = s.z;
+  vec2 fwdUv = vec2(cos(heading) / uAspect, sin(heading));
+  vec2 rgtUv = vec2(sin(heading) / uAspect, -cos(heading));
+  float d = uScale * 0.5;
+  // Sample the surface fore/aft and port/starboard to get the boat's attitude.
+  vec3 c  = world(uv);
+  vec3 pf = world(uv + fwdUv * d * 0.5);
+  vec3 pb = world(uv - fwdUv * d * 0.5);
+  vec3 pr = world(uv + rgtUv * d * 0.25);
+  vec3 pl = world(uv - rgtUv * d * 0.25);
+  vec3 fwd = normalize(pf - pb);
+  vec3 rgt = normalize(pr - pl);
+  vec3 up = normalize(cross(fwd, rgt));
+  if (up.z < 0.0) { up = -up; }
+  rgt = normalize(cross(up, fwd));
+  vec3 center = (c + pf + pb + pr + pl) * 0.2;
+  vec3 p = center + (aPos.x * fwd + aPos.y * rgt + aPos.z * up) * uScale;
+  vCol = aCol;
+  vWorld = p;
+  gl_Position = uVP * vec4(p, 1.0);
+}`;
+
+export const FRAG_BOAT = `#version 300 es
+precision highp float;
+in vec3 vCol;
+in vec3 vWorld;
+out vec4 frag;
+uniform vec3 uEye;
+void main() {
+  vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+  vec3 sun = normalize(vec3(0.4, 0.6, 0.7));
+  vec3 V = normalize(uEye - vWorld);
+  float diff = max(dot(n, sun), 0.0);
+  vec3 H = normalize(sun + V);
+  float spec = pow(max(dot(n, H), 0.0), 40.0) * 0.3;
+  vec3 col = vCol * (0.35 + 0.65 * diff) + spec;
   frag = vec4(col, 1.0);
 }`;
