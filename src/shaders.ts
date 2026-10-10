@@ -141,3 +141,100 @@ void main() {
   col += vec3(0.05) * min(length(vel) * 0.1, 0.5);
   frag = vec4(col, 1.0);
 }`;
+
+// Surface wave equation on the height field (x = height, y = vertical velocity).
+// h_tt = c^2 * Lap(h) - damping, with Neumann (reflecting) walls via clamped sampling.
+export const WAVE = HEADER + `
+uniform sampler2D uField;
+uniform float uDt;
+uniform float uC2;
+uniform float uDamp;
+void main() {
+  vec2 f = texture(uField, vUv).xy;
+  float L = texture(uField, vUv - vec2(uTexel.x, 0.0)).x;
+  float R = texture(uField, vUv + vec2(uTexel.x, 0.0)).x;
+  float B = texture(uField, vUv - vec2(0.0, uTexel.y)).x;
+  float T = texture(uField, vUv + vec2(0.0, uTexel.y)).x;
+  float lap = L + R + B + T - 4.0 * f.x;
+  float v = clamp((f.y + uC2 * lap * uDt) * uDamp, -2.0, 2.0);
+  float h = clamp(f.x + v * uDt, -2.0, 2.0);
+  frag = vec4(h, v, 0.0, 1.0);
+}`;
+
+export const VERT3D = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 aUv;
+uniform sampler2D uHeight;
+uniform mat4 uVP;
+uniform float uAspect;
+uniform float uHeightScale;
+out vec2 vUv;
+out vec3 vPos;
+void main() {
+  float h = texture(uHeight, aUv).x;
+  vec3 p = vec3((aUv.x - 0.5) * 2.0 * uAspect, (aUv.y - 0.5) * 2.0, h * uHeightScale);
+  vUv = aUv;
+  vPos = p;
+  gl_Position = uVP * vec4(p, 1.0);
+}`;
+
+export const FRAG3D = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 vUv;
+in vec3 vPos;
+out vec4 frag;
+uniform sampler2D uHeight;
+uniform sampler2D uVelocity;
+uniform vec2 uTexel;
+uniform vec3 uEye;
+uniform float uAspect;
+uniform float uHeightScale;
+
+vec3 sky(vec3 d) {
+  float t = clamp(d.z, 0.0, 1.0);
+  vec3 horizon = vec3(0.75, 0.85, 0.95);
+  vec3 zenith = vec3(0.10, 0.30, 0.65);
+  vec3 c = mix(horizon, zenith, pow(t, 0.6));
+  vec3 sun = normalize(vec3(0.4, 0.6, 0.7));
+  c += vec3(1.0, 0.95, 0.85) * pow(max(dot(d, sun), 0.0), 400.0) * 2.0;
+  return c;
+}
+
+void main() {
+  float hL = texture(uHeight, vUv - vec2(uTexel.x, 0.0)).x;
+  float hR = texture(uHeight, vUv + vec2(uTexel.x, 0.0)).x;
+  float hB = texture(uHeight, vUv - vec2(0.0, uTexel.y)).x;
+  float hT = texture(uHeight, vUv + vec2(0.0, uTexel.y)).x;
+  float dx = 2.0 * uAspect * uTexel.x;
+  float dy = 2.0 * uTexel.y;
+  vec3 n = normalize(vec3(-(hR - hL) * uHeightScale / (2.0 * dx), -(hT - hB) * uHeightScale / (2.0 * dy), 1.0));
+
+  vec3 V = normalize(uEye - vPos);
+  vec3 Rv = reflect(-V, n);
+  float fresnel = 0.04 + 0.96 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+
+  // Refracted pool floor.
+  vec3 Rf = refract(-V, n, 1.0 / 1.333);
+  float depth = 0.5;
+  float t = (-depth - vPos.z) / min(Rf.z, -0.05);
+  vec3 floorP = vPos + Rf * t;
+  vec2 fuv = vec2(floorP.x / (2.0 * uAspect) + 0.5, floorP.y * 0.5 + 0.5);
+  float tile = smoothstep(0.46, 0.5, abs(fract(fuv.x * 8.0) - 0.5)) +
+               smoothstep(0.46, 0.5, abs(fract(fuv.y * 8.0) - 0.5));
+  vec3 floorCol = vec3(0.12, 0.45, 0.62) + tile * 0.10;
+  float outside = step(0.0, -fuv.x) + step(1.0, fuv.x) + step(0.0, -fuv.y) + step(1.0, fuv.y);
+  floorCol = mix(floorCol, vec3(0.05, 0.12, 0.2), clamp(outside, 0.0, 1.0));
+  float absorb = exp(-length(Rf * t) * 1.2);
+  vec3 water = vec3(0.02, 0.15, 0.3);
+  vec3 refr = mix(water, floorCol, absorb);
+
+  vec3 col = mix(refr, sky(Rv), fresnel);
+  vec3 sun = normalize(vec3(0.4, 0.6, 0.7));
+  vec3 H = normalize(sun + V);
+  col += vec3(1.0) * pow(max(dot(n, H), 0.0), 120.0) * 0.8;
+  float speed = length(texture(uVelocity, vUv).xy);
+  col += vec3(0.15, 0.2, 0.2) * min(speed * 0.05, 0.4);
+  frag = vec4(col, 1.0);
+}`;

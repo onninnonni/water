@@ -19,6 +19,8 @@
              padding: 5px 10px; cursor: pointer; font: inherit; }
     button:hover { background: #1e3a55; }
     button.active { background: #2f7fd1; border-color: #5fa8ff; }
+    .only3d { display: none; }
+    body.view3d .only3d { display: flex; }
     .hint { opacity: 0.7; font-size: 12px; margin-top: 8px; }
   </style>
 </head>
@@ -30,6 +32,13 @@
       <label for="visc">Viscosity</label>
       <input id="visc" type="range" min="0" max="100" value="12" />
       <output id="viscOut"></output>
+    </div>
+    <div class="row">
+      <label>View</label>
+      <div class="btns" id="view">
+        <button data-view="2d" class="active">2D</button>
+        <button data-view="3d">3D</button>
+      </div>
     </div>
     <div class="row">
       <label>Damping</label>
@@ -44,11 +53,15 @@
       <label for="splat">Brush size</label>
       <input id="splat" type="range" min="1" max="100" value="30" />
     </div>
+    <div class="row only3d">
+      <label for="height">Wave height</label>
+      <input id="height" type="range" min="0" max="100" value="40" />
+    </div>
     <div class="btns">
       <button id="reset">Reset</button>
       <button id="pause">Pause</button>
     </div>
-    <div class="hint">Drag with the mouse (or touch) to push the water. Walls reflect.</div>
+    <div class="hint" id="hint">Drag with the mouse (or touch) to push the water. Walls reflect.</div>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>
