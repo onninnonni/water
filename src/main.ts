@@ -214,7 +214,8 @@ const pBoatState = new Program(BOAT_STATE);
 const pBoat = new Program(FRAG_BOAT, VERT_BOAT, ['aPos', 'aCol']);
 
 // ---------- State ----------
-let velocity!: DoubleFBO, pressure!: DoubleFBO, divergence!: FBO, viscB!: FBO, dye!: DoubleFBO;
+// dye: 2D view's surface shading field (original look). wave: 3D view's height field (x = h, y = dh/dt).
+let velocity!: DoubleFBO, pressure!: DoubleFBO, divergence!: FBO, viscB!: FBO, dye!: DoubleFBO, wave!: DoubleFBO;
 const boatState = createDoubleFBO(1, 1);
 const BOAT_SCALE = 0.26;
 let simW = 0, simH = 0, dyeW = 0, dyeH = 0;
@@ -236,6 +237,7 @@ function resize() {
   divergence = createFBO(simW, simH);
   viscB = createFBO(simW, simH);
   dye = createDoubleFBO(dyeW, dyeH);
+  wave = createDoubleFBO(dyeW, dyeH);
   const [mx, my] = dims(MESH_RES);
   buildMesh(mx, my);
 }
@@ -288,7 +290,7 @@ viewButtons.forEach((b) => b.addEventListener('click', () => {
 }));
 function clearAll() {
   for (const f of [velocity.read, velocity.write, pressure.read, pressure.write, divergence, viscB, dye.read, dye.write,
-    boatState.read, boatState.write]) {
+    wave.read, wave.write, boatState.read, boatState.write]) {
     G.bindFramebuffer(G.FRAMEBUFFER, f.fb); G.clearColor(0, 0, 0, 0); G.clear(G.COLOR_BUFFER_BIT);
   }
 }
@@ -393,10 +395,17 @@ function splat(x: number, y: number, dx: number, dy: number) {
     .tex('uTarget', velocity.read.attach(0)).v3('uValue', dx * force, dy * force, 0);
   blit(velocity.write); velocity.swap();
 
-  // Push the surface down where the finger moves; the wave equation turns it into ripples.
-  pSplat.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
-    .tex('uTarget', dye.read.attach(0)).v3('uValue', -Math.min(speed * 8, 0.3), 0, 0);
-  blit(dye.write); dye.swap();
+  if (view3D) {
+    // Push the surface down where the finger moves; the wave equation turns it into ripples.
+    pSplat.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
+      .tex('uTarget', wave.read.attach(0)).v3('uValue', -Math.min(speed * 8, 0.3), 0, 0);
+    blit(wave.write); wave.swap();
+  } else {
+    // 2D: brighten the stirred water.
+    pSplat.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
+      .tex('uTarget', dye.read.attach(0)).v3('uValue', Math.min(speed * 40, 1.2), 0, 0);
+    blit(dye.write); dye.swap();
+  }
 }
 
 function step(dt0: number) {
@@ -458,17 +467,25 @@ function step(dt0: number) {
   pBound.use().v2('uTexel', tx, ty).tex('uVelocity', velocity.read.attach(0));
   blit(velocity.write); velocity.swap();
 
-  // 8. Advect the surface height field with the flow.
-  pAdvect.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', dt * (dyeW / simW)).f('uDissipation', 1.0)
-    .tex('uVelocity', velocity.read.attach(0)).tex('uSource', dye.read.attach(1));
-  blit(dye.write); dye.swap();
-
-  // 8b. Boat: drift with the current, turn toward its motion.
+  // 8. Boat: drift with the current, turn toward its motion.
   pBoatState.use().v2('uTexel', tx, ty).f('uDt', dt).f('uAspect', aspect)
     .tex('uState', boatState.read.attach(0)).tex('uVelocity', velocity.read.attach(1));
   blit(boatState.write); boatState.swap();
 
-  // 9. Surface waves: h_tt = c^2 Lap h (explicit, CFL: c^2 dt^2 <= 0.5). Sub-stepped so the
+  if (!view3D) {
+    // 9 (2D). Advect the shading field with the flow and let it fade.
+    pAdvect.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', dt * (dyeW / simW)).f('uDissipation', 0.985)
+      .tex('uVelocity', velocity.read.attach(0)).tex('uSource', dye.read.attach(1));
+    blit(dye.write); dye.swap();
+    return;
+  }
+
+  // 9 (3D). Advect the height field with the flow.
+  pAdvect.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', dt * (dyeW / simW)).f('uDissipation', 1.0)
+    .tex('uVelocity', velocity.read.attach(0)).tex('uSource', wave.read.attach(1));
+  blit(wave.write); wave.swap();
+
+  // 10 (3D). Surface waves: h_tt = c^2 Lap h (explicit, CFL: c^2 dt^2 <= 0.5). Sub-stepped so the
   // speed slider can raise the wave speed beyond the CFL limit of one step per frame.
   const subs = Math.max(1, Math.round(2 * sf));
   const wdt = dt0;
@@ -478,8 +495,8 @@ function step(dt0: number) {
     .f('uAspect', aspect).f('uBoatSize', showBoat ? BOAT_SCALE * 0.25 : 0.0001)
     .tex('uBoat', boatState.read.attach(1));
   for (let i = 0; i < subs; i++) {
-    pWave.tex('uField', dye.read.attach(0));
-    blit(dye.write); dye.swap();
+    pWave.tex('uField', wave.read.attach(0));
+    blit(wave.write); wave.swap();
   }
 }
 
@@ -487,7 +504,7 @@ function drawBoat(vp: Mat4, eye: [number, number, number], heightScale: number) 
   if (!showBoat) return;
   pBoat.use().m4('uVP', vp).v2('uTexel', 1 / dyeW, 1 / dyeH).f('uAspect', aspect).f('uHeightScale', heightScale)
     .f('uScale', BOAT_SCALE).v3('uEye', eye[0], eye[1], eye[2])
-    .tex('uState', boatState.read.attach(0)).tex('uHeight', dye.read.attach(1));
+    .tex('uState', boatState.read.attach(0)).tex('uHeight', wave.read.attach(1));
   G.bindVertexArray(boatVao);
   G.drawArrays(G.TRIANGLES, 0, boatVertCount);
   G.bindVertexArray(quadVao);
@@ -514,7 +531,7 @@ function render3D() {
   G.clear(G.COLOR_BUFFER_BIT | G.DEPTH_BUFFER_BIT);
   pMesh.use().m4('uVP', viewProj()).f('uAspect', aspect).f('uHeightScale', heightScale)
     .v2('uTexel', 1 / dyeW, 1 / dyeH).v3('uEye', eye[0], eye[1], eye[2])
-    .tex('uHeight', dye.read.attach(0)).tex('uVelocity', velocity.read.attach(1));
+    .tex('uHeight', wave.read.attach(0)).tex('uVelocity', velocity.read.attach(1));
   G.bindVertexArray(meshVao);
   G.drawElements(G.TRIANGLES, meshIndexCount, G.UNSIGNED_INT, 0);
   G.bindVertexArray(quadVao);
@@ -547,7 +564,7 @@ requestAnimationFrame(frame);
   return {
     boat: rd(boatState.read, 0, 0),
     velC: rd(velocity.read, simW >> 1, simH >> 1),
-    dyeC: rd(dye.read, dyeW >> 1, dyeH >> 1),
+    dyeC: rd(dye.read, dyeW >> 1, dyeH >> 1), waveC: rd(wave.read, dyeW >> 1, dyeH >> 1),
     dye0: rd(dye.read, 2, 2),
     cam: { ...cam }, aspect, up: unproject(0.5, 0.6),
   };
