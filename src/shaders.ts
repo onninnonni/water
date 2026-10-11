@@ -230,7 +230,7 @@ void main() {
   vec2 wp = worldXY(vUv, uAspect);
   float vTot = v + swellV(wp);
   float hTot = h + swellH(wp);
-  float splash = max(vTot - 0.014, 0.0) * 4.0 * smoothstep(0.0, 0.06, hTot);
+  float splash = max(vTot - 0.035, 0.0) * 2.5 * smoothstep(0.02, 0.12, hTot);
 
   if (r2 < 2.5) {
     // Water level the boat floats at: mean of the surface at bow, stern and both beams.
@@ -320,9 +320,9 @@ void main() {
   }
   vec3 fld = texture(uField, uv).xyz;
   vec2 wp0 = worldXY(uv, uAspect);
-  float fold = max(0.35 - swellJ(wp0, uHeightScale), 0.0);
-  float splash = fld.z + fold * 0.25;
-  if (splash > r2 * 0.03) {
+  float fold = max(0.05 - swellJ(wp0, uHeightScale), 0.0);
+  float splash = fld.z + fold * 0.3;
+  if (splash > r2 * 0.06 + 0.01) {
     vec2 wp = wp0;
     vec3 pos = vec3(wp + swellD(wp, uHeightScale), (fld.x + swellH(wp)) * uHeightScale + 0.015);
     // Throw downhill off the crest (surface gradient) and with the current.
@@ -394,7 +394,10 @@ vec3 surf(vec2 uv) {
   float hB = texture(uHeight, uv - vec2(0.0, uTexel.y)).x;
   float hT = texture(uHeight, uv + vec2(0.0, uTexel.y)).x;
   vec2 grad = vec2((hR - hL) / (2.0 * uTexel.x * 2.0 * uAspect), (hT - hB) / (2.0 * uTexel.y * 2.0)) * uHeightScale;
-  vec2 d = -uChop * 0.016 * grad + swellD(wp, uHeightScale);
+  vec2 cd = -uChop * 0.008 * grad;
+  float cl = length(cd);
+  if (cl > 0.03) cd *= 0.03 / cl;
+  vec2 d = cd + swellD(wp, uHeightScale);
   return vec3(wp + d, (h + swellH(wp)) * uHeightScale);
 }
 void main() {
@@ -405,7 +408,7 @@ void main() {
   vN = normalize(cross(px, py));
   // Area ratio of the displaced patch vs. the flat one: near zero or negative = folding crest.
   float J = (px.x * py.y - px.y * py.x) / (2.0 * e.x * 2.0 * uAspect * 2.0 * e.y * 2.0);
-  vFold = 1.0 - smoothstep(0.15, 0.6, J);
+  vFold = 1.0 - smoothstep(0.0, 0.3, J);
   vUv = aUv;
   vPos = p;
   gl_Position = uVP * vec4(p, 1.0);
@@ -561,76 +564,22 @@ void main() {
   frag = vec4(col, 1.0);
 }`;
 
-// Shovel: an elongated blade perpendicular to the drag direction. uMode 0 writes a height
-// dipole (ridge ahead, trough behind) into the wave field; uMode 1 writes a plain bump (2D dye).
-export const SHOVEL = HEADER + `
+// Push (3D): a round brush that shoves water along the drag: ridge ahead, trough behind,
+// with upward momentum on the ridge so it launches a travelling wave.
+export const PUSH_WAVE = HEADER + `
 uniform sampler2D uTarget;
 uniform vec2 uPoint;
 uniform vec2 uDir;       // unit drag direction, aspect-corrected
-uniform float uWidth;    // blade half-width across the drag (uv-y units)
-uniform float uThick;    // blade thickness along the drag
+uniform float uRadius;   // brush radius (uv-y units)
 uniform float uAmount;
 uniform float uAspect;
-uniform int uMode;
 void main() {
   vec2 d = vUv - uPoint; d.x *= uAspect;
   float along = dot(d, uDir);
-  float across = dot(d, vec2(-uDir.y, uDir.x));
-  float w = exp(-across * across / (uWidth * uWidth)) * exp(-along * along / (uThick * uThick));
+  float w = exp(-dot(d, d) / (uRadius * uRadius));
+  float dip = along / uRadius * 1.65;
   vec4 t = texture(uTarget, vUv);
-  if (uMode == 0) {
-    float dip = along / uThick * 1.65;   // dipole: + ahead of the blade, - behind
-    t.x += uAmount * w * dip;
-    t.y += uAmount * w * dip * 0.35;     // give the ridge upward momentum too
-  } else {
-    t.x += uAmount * w;
-  }
+  t.x += uAmount * w * dip;
+  t.y += uAmount * w * dip * 0.35;
   frag = t;
-}`;
-
-// Shovel push on the fluid velocity: the whole blade pushes water along the drag.
-export const SHOVEL_VEL = HEADER + `
-uniform sampler2D uTarget;
-uniform vec2 uPoint;
-uniform vec2 uDir;
-uniform float uWidth;
-uniform float uThick;
-uniform vec2 uForce;
-uniform float uAspect;
-void main() {
-  vec2 d = vUv - uPoint; d.x *= uAspect;
-  float along = dot(d, uDir);
-  float across = dot(d, vec2(-uDir.y, uDir.x));
-  float w = exp(-across * across / (uWidth * uWidth)) * exp(-along * along / (uThick * uThick * 2.0));
-  vec4 t = texture(uTarget, vUv);
-  t.xy += uForce * w;
-  frag = t;
-}`;
-
-// Shovel blade mesh, placed at the pointer on the water surface, facing the drag direction.
-export const VERT_TOOL = `#version 300 es
-precision highp float;
-precision highp sampler2D;
-in vec3 aPos;
-in vec3 aCol;
-uniform sampler2D uHeight;
-uniform mat4 uVP;
-uniform vec2 uPoint;     // uv
-uniform vec2 uDir;       // unit, world xy
-uniform float uAspect;
-uniform float uHeightScale;
-uniform float uScale;
-${SWELL_GLSL}
-out vec3 vCol;
-out vec3 vWorld;
-void main() {
-  vec2 wp = worldXY(uPoint, uAspect);
-  float h = (texture(uHeight, uPoint).x + swellH(wp)) * uHeightScale;
-  wp += swellD(wp, uHeightScale);
-  vec3 fwd = vec3(uDir, 0.0);
-  vec3 rgt = vec3(-uDir.y, uDir.x, 0.0);
-  vec3 p = vec3(wp, h) + (aPos.x * fwd + aPos.y * rgt + vec3(0.0, 0.0, aPos.z)) * uScale;
-  vCol = aCol;
-  vWorld = p;
-  gl_Position = uVP * vec4(p, 1.0);
 }`;

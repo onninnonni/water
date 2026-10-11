@@ -1,7 +1,7 @@
 import {
   VERT, ADVECT, SPLAT, DIVERGENCE, JACOBI, GRADIENT_SUBTRACT, BOUNDARY, DISPLAY, WAVE, VERT3D, FRAG3D,
   BOAT_STATE, VERT_BOAT, FRAG_BOAT, PARTICLE_UPDATE, VERT_PARTICLE, FRAG_PARTICLE,
-  SHOVEL, SHOVEL_VEL, VERT_TOOL,
+  PUSH_WAVE,
 } from './shaders';
 import { Mat4, perspective, lookAt, multiply, ortho } from './mat4';
 
@@ -196,44 +196,6 @@ function buildBoat() {
 }
 buildBoat();
 
-// Shovel blade: steel blade tilted back, wooden shaft. Local frame: x = drag direction, z up.
-const toolVao = G.createVertexArray()!;
-let toolVertCount = 0;
-function buildTool() {
-  const v: number[] = [];
-  type P = [number, number, number];
-  const tri = (a: P, b: P, c: P, col: P) => { for (const q of [a, b, c]) v.push(...q, ...col); };
-  const quad = (a: P, b: P, c: P, d: P, col: P) => { tri(a, b, c, col); tri(a, c, d, col); };
-  const STEEL: P = [0.72, 0.74, 0.78], EDGE: P = [0.9, 0.9, 0.92], WOOD: P = [0.55, 0.38, 0.2];
-  // Blade: y across (half-width 1), z from -0.35 (in the water) to 0.5, leaning back (-x) as it rises.
-  const back = (z: number) => -0.25 * (z + 0.35);
-  const bl = (y: number, z: number, t: number): P => [back(z) + t, y, z];
-  const zs = [-0.35, -0.1, 0.2, 0.5], ws = [0.85, 1.0, 1.0, 0.95];
-  for (let i = 0; i < zs.length - 1; i++) {
-    const z0 = zs[i], z1 = zs[i + 1], w0 = ws[i], w1 = ws[i + 1];
-    quad(bl(-w0, z0, 0.02), bl(w0, z0, 0.02), bl(w1, z1, 0.02), bl(-w1, z1, 0.02), i === 0 ? EDGE : STEEL);
-    quad(bl(-w0, z0, -0.02), bl(-w1, z1, -0.02), bl(w1, z1, -0.02), bl(w0, z0, -0.02), STEEL);
-    quad(bl(w0, z0, -0.02), bl(w1, z1, -0.02), bl(w1, z1, 0.02), bl(w0, z0, 0.02), STEEL);
-    quad(bl(-w0, z0, -0.02), bl(-w0, z0, 0.02), bl(-w1, z1, 0.02), bl(-w1, z1, -0.02), STEEL);
-  }
-  // Shaft: from the blade top, up and back.
-  const s0: P = [back(0.5) - 0.02, 0, 0.5], s1: P = [back(0.5) - 0.9, 0, 1.6];
-  const r = 0.06;
-  for (const [ax, ay] of [[r, 0], [0, r], [-r, 0], [0, -r]] as [number, number][]) {
-    const [bx, by] = [-ay, ax];
-    quad([s0[0] + ax, s0[1] + ay, s0[2]], [s0[0] + bx, s0[1] + by, s0[2]], [s1[0] + bx, s1[1] + by, s1[2]], [s1[0] + ax, s1[1] + ay, s1[2]], WOOD);
-  }
-  G.bindVertexArray(toolVao);
-  const buf = G.createBuffer()!;
-  G.bindBuffer(G.ARRAY_BUFFER, buf);
-  G.bufferData(G.ARRAY_BUFFER, new Float32Array(v), G.STATIC_DRAW);
-  G.enableVertexAttribArray(0); G.vertexAttribPointer(0, 3, G.FLOAT, false, 24, 0);
-  G.enableVertexAttribArray(1); G.vertexAttribPointer(1, 3, G.FLOAT, false, 24, 12);
-  toolVertCount = v.length / 6;
-  G.bindVertexArray(quadVao);
-}
-buildTool();
-
 // Spray particles: N particles stored in two W x H textures.
 const PART_W = 128, PART_H = isMobile ? 32 : 64, PART_N = PART_W * PART_H;
 const partVao = G.createVertexArray()!; // no attributes; uses gl_VertexID
@@ -306,9 +268,7 @@ const pMesh = new Program(FRAG3D, VERT3D, ['aUv']);
 const pBoatState = new Program(BOAT_STATE);
 const pBoat = new Program(FRAG_BOAT, VERT_BOAT, ['aPos', 'aCol']);
 const pPartUpdate = new Program(PARTICLE_UPDATE);
-const pShovel = new Program(SHOVEL);
-const pShovelVel = new Program(SHOVEL_VEL);
-const pTool = new Program(FRAG_BOAT, VERT_TOOL, ['aPos', 'aCol']);
+const pPushWave = new Program(PUSH_WAVE);
 const pPart = new Program(FRAG_PARTICLE, VERT_PARTICLE, []);
 
 // ---------- State ----------
@@ -362,14 +322,7 @@ speedSlider.addEventListener('input', updateSpeedLabel);
 updateSpeedLabel();
 const dampButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('#damp button'));
 const viewButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('#view button'));
-const toolButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('#tool button'));
-let tool: 'push' | 'shovel' = 'push';
-toolButtons.forEach((b) => b.addEventListener('click', () => {
-  tool = b.dataset.tool as 'push' | 'shovel';
-  toolButtons.forEach((x) => x.classList.toggle('active', x === b));
-}));
-// Last shovel blade pose (uv + unit direction) for drawing it while dragging.
-const shovelPose = { x: 0.5, y: 0.5, dx: 1, dy: 0, active: false };
+
 const hint = $<HTMLDivElement>('hint');
 // [velocity dissipation, wave damping]
 const DAMP_LEVELS: [number, number][] = [[1.0, 0.998], [0.995, 0.99], [0.975, 0.97], [0.93, 0.92]];
@@ -495,34 +448,7 @@ canvas.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ---------- Simulation step ----------
-function shovel(x: number, y: number, dx: number, dy: number) {
-  // Direction in aspect-corrected uv space (x scaled by aspect so angles are true).
-  let ax = dx * aspect, ay = dy;
-  const m = Math.hypot(ax, ay);
-  if (m < 1e-6) return;
-  ax /= m; ay /= m;
-  shovelPose.x = x; shovelPose.y = y; shovelPose.dx = ax; shovelPose.dy = ay;
-  const speed = Math.hypot(dx, dy);
-  const width = 0.05 + (Number(splatSlider.value) / 100) * 0.2;  // blade half-width
-  const thick = 0.025;
-  const amount = Math.min(speed * 6, 0.25);
-  // Height dipole (3D wave field) or bump (2D dye).
-  const field = view3D ? wave : dye;
-  pShovel.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).v2('uDir', ax, ay)
-    .f('uWidth', width).f('uThick', thick).f('uAmount', view3D ? amount : amount * 3).f('uAspect', aspect)
-    .tex('uTarget', field.read.attach(0));
-  G.uniform1i(pShovel.uniforms.get('uMode')!, view3D ? 0 : 1);
-  blit(field.write); field.swap();
-  // Push the fluid along the drag across the whole blade.
-  const force = Math.min(speed, 0.04) * 900;
-  pShovelVel.use().v2('uTexel', 1 / simW, 1 / simH).v2('uPoint', x, y).v2('uDir', ax, ay)
-    .f('uWidth', width).f('uThick', thick * 2).v2('uForce', ax / aspect * force, ay * force).f('uAspect', aspect)
-    .tex('uTarget', velocity.read.attach(0));
-  blit(velocity.write); velocity.swap();
-}
-
 function splat(x: number, y: number, dx: number, dy: number) {
-  if (tool === 'shovel') { shovel(x, y, dx, dy); return; }
   const radius = (Number(splatSlider.value) / 100) * 0.01 + 0.0004;
   const force = 1400;
   const speed = Math.hypot(dx, dy);
@@ -532,10 +458,17 @@ function splat(x: number, y: number, dx: number, dy: number) {
   blit(velocity.write); velocity.swap();
 
   if (view3D) {
-    // Push the surface down where the finger moves; the wave equation turns it into ripples.
-    pSplat.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
-      .tex('uTarget', wave.read.attach(0)).v3('uValue', -Math.min(speed * 8, 0.3), 0, 0);
-    blit(wave.write); wave.swap();
+    // Shove water along the drag: ridge ahead of the brush, trough behind, launching a wave.
+    let ax = dx * aspect, ay = dy;
+    const m = Math.hypot(ax, ay);
+    if (m > 1e-6) {
+      ax /= m; ay /= m;
+      const r = 0.03 + (Number(splatSlider.value) / 100) * 0.12;
+      const amount = Math.min(speed * 4, 0.12);
+      pPushWave.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).v2('uDir', ax, ay)
+        .f('uRadius', r).f('uAmount', amount).f('uAspect', aspect).tex('uTarget', wave.read.attach(0));
+      blit(wave.write); wave.swap();
+    }
   } else {
     // 2D: brighten the stirred water.
     pSplat.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
@@ -550,9 +483,7 @@ function step(dt0: number) {
   const dt = dt0 * sf; // fluid time step
   const [velDamp, waveDamp] = DAMP_LEVELS[dampLevel];
 
-  shovelPose.active = tool === 'shovel' && [...pointers.values()].some((p) => !p.orbit);
   for (const p of pointers.values()) {
-    if (tool === 'shovel' && !p.orbit) { shovelPose.x = p.x; shovelPose.y = p.y; }
     if (p.moved && (p.dx !== 0 || p.dy !== 0) && !p.orbit) {
       // Clamp per-frame displacement so unprojection jumps near the horizon can't inject huge forces.
       const m = Math.hypot(p.dx, p.dy), cap = 0.04;
@@ -664,17 +595,6 @@ function drawBoat(vp: Mat4, eye: [number, number, number], heightScale: number) 
   G.bindVertexArray(quadVao);
 }
 
-function drawTool(vp: Mat4, eye: [number, number, number], heightScale: number) {
-  if (!shovelPose.active) return;
-  pTool.use().m4('uVP', vp).v2('uPoint', shovelPose.x, shovelPose.y).v2('uDir', shovelPose.dx, shovelPose.dy)
-    .f('uAspect', aspect).f('uHeightScale', heightScale).f('uScale', 0.07 + (Number(splatSlider.value) / 100) * 0.3)
-    .v3('uEye', eye[0], eye[1], eye[2]).f('uSwell', view3D ? swellAmp() : 0).f('uSimTime', simTime).f('uChop', chop())
-    .tex('uHeight', (view3D ? wave : dye).read.attach(0));
-  G.bindVertexArray(toolVao);
-  G.drawArrays(G.TRIANGLES, 0, toolVertCount);
-  G.bindVertexArray(quadVao);
-}
-
 function render2D(t: number) {
   pDisplay.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uTime', t)
     .tex('uDye', dye.read.attach(0)).tex('uPressure', pressure.read.attach(1)).tex('uVelocity', velocity.read.attach(2));
@@ -683,7 +603,6 @@ function render2D(t: number) {
   G.enable(G.DEPTH_TEST);
   G.clear(G.DEPTH_BUFFER_BIT);
   drawBoat(ortho(-aspect, aspect, -1, 1, -10, 10), [0, 0, 10], 0.0);
-  drawTool(ortho(-aspect, aspect, -1, 1, -10, 10), [0, 0, 10], 0.0);
   G.disable(G.DEPTH_TEST);
 }
 
@@ -721,7 +640,6 @@ function render3D() {
   G.bindVertexArray(quadVao);
   const vp = viewProj();
   drawBoat(vp, eye, heightScale);
-  drawTool(vp, eye, heightScale);
   drawSpray(vp);
   G.disable(G.DEPTH_TEST);
 }
