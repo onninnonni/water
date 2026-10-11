@@ -1,921 +1,799 @@
-import {
-  VERT, ADVECT, SPLAT, DIVERGENCE, JACOBI, GRADIENT_SUBTRACT, BOUNDARY, DISPLAY, WAVE, VERT3D, FRAG3D,
-  VERT_BOAT, FRAG_BOAT, PARTICLE_UPDATE, VERT_PARTICLE, FRAG_PARTICLE,
-  BALL_PUSH, BALL_VEL, BOAT_INFO, SHIFT, SKY_PASS,
-} from './shaders';
-import { Mat4, perspective, lookAt, multiply, ortho } from './mat4';
+import * as S from './shaders';
+import { Mat4, perspective, lookAt, multiply } from './mat4';
+import { IC, SUN_DIR, WIND_DIR, clamp, mix, mix3, smoothstep, stormAt, norm3 } from './world';
+import { uWA, uWB, updatePhases, sampleWater, newSample, sigWaveHeight } from './waves';
+import { buildLand, buildShoreMap, buildBuoy, PILLARS, ARCH, LIGHTHOUSE, BUOYS, SHORE, BUOY_COLS } from './island';
+import { Boat, boatAxes, buildBoatMesh, buildWheelMesh, EYE, WHEEL_POS } from './boat';
 import { SeaAudio } from './audio';
+import type { V3 } from './mesh';
 
-// ---------- WebGL setup ----------
-const canvas = document.getElementById('c') as HTMLCanvasElement;
-const gl = canvas.getContext('webgl2', { antialias: new URLSearchParams(location.search).get('aa') === '1', alpha: false, powerPreference: 'high-performance' });
-if (!gl) throw new Error('WebGL2 is required');
-const G: WebGL2RenderingContext = gl;
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const isTouch = navigator.maxTouchPoints > 0 && matchMedia('(pointer: coarse)').matches;
+const isMobile = isTouch || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+if (isTouch) document.body.classList.add('touch');
 
-// Pick a renderable float texture format. RGBA16F is the most portable; some
-// desktops only expose EXT_color_buffer_float (32F), some phones only half-float.
+function fail(msg: string) {
+  const e = $('err'); e.style.display = 'flex'; e.textContent = msg;
+  $('start').style.display = 'none';
+}
+
+// ---------- WebGL ----------
+const canvas = $<HTMLCanvasElement>('c');
+const glc = canvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance' });
+if (!glc) { fail('This game needs WebGL2, which this browser does not provide.'); throw new Error('no webgl2'); }
+const G: WebGL2RenderingContext = glc;
 G.getExtension('EXT_color_buffer_float');
 G.getExtension('EXT_color_buffer_half_float');
-const linearFloat = !!G.getExtension('OES_texture_float_linear');
 
-interface TexFormat { internal: number; format: number; type: number; filter: number; }
-function probeFormat(internal: number, type: number, filter: number): TexFormat | null {
-  const tex = G.createTexture()!;
-  G.bindTexture(G.TEXTURE_2D, tex);
-  G.texParameteri(G.TEXTURE_2D, G.TEXTURE_MIN_FILTER, filter);
-  G.texParameteri(G.TEXTURE_2D, G.TEXTURE_MAG_FILTER, filter);
-  G.texImage2D(G.TEXTURE_2D, 0, internal, 4, 4, 0, G.RGBA, type, null);
-  const fb = G.createFramebuffer()!;
-  G.bindFramebuffer(G.FRAMEBUFFER, fb);
-  G.framebufferTexture2D(G.FRAMEBUFFER, G.COLOR_ATTACHMENT0, G.TEXTURE_2D, tex, 0);
-  const ok = G.checkFramebufferStatus(G.FRAMEBUFFER) === G.FRAMEBUFFER_COMPLETE;
-  G.bindFramebuffer(G.FRAMEBUFFER, null);
-  G.deleteFramebuffer(fb); G.deleteTexture(tex);
-  return ok ? { internal, format: G.RGBA, type, filter } : null;
-}
-const probed =
-  probeFormat(G.RGBA16F, G.HALF_FLOAT, G.LINEAR) ??
-  probeFormat(G.RGBA32F, G.FLOAT, linearFloat ? G.LINEAR : G.NEAREST);
-if (!probed) throw new Error('Float render targets are not supported on this device');
-const FMT: TexFormat = probed;
-const HALF = FMT.type === G.HALF_FLOAT;
-
-// Float <-> half-float helpers for uploading / reading small state textures.
-const f32 = new Float32Array(1), u32 = new Uint32Array(f32.buffer);
-function toHalf(v: number): number {
-  f32[0] = v; const x = u32[0];
-  const sign = (x >> 16) & 0x8000; let exp = ((x >> 23) & 0xff) - 127 + 15; let mant = x & 0x7fffff;
-  if (exp <= 0) return sign; if (exp >= 31) return sign | 0x7c00;
-  return sign | (exp << 10) | (mant >> 13);
-}
-function fromHalf(h: number): number {
-  const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, m = h & 0x3ff;
-  if (e === 0) return s * Math.pow(2, -14) * (m / 1024);
-  if (e === 31) return m ? NaN : s * Infinity;
-  return s * Math.pow(2, e - 15) * (1 + m / 1024);
-}
-
-const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || navigator.maxTouchPoints > 1;
-if (navigator.maxTouchPoints > 0) document.body.classList.add('touch');
-const Q = new URLSearchParams(location.search);
-const qn = (k: string, d: number) => { const v = Q.get(k); return v === null ? d : Number(v); };
-const SIM_RES = qn('sim', isMobile ? 160 : 256);
-const DYE_RES = qn('dye', isMobile ? 384 : 640);
-const MESH_RES = qn('mesh', isMobile ? 160 : 256);
-const PRESSURE_ITERS = qn('pi', isMobile ? 20 : 30);
-const VISC_ITERS = qn('vi', isMobile ? 8 : 12);
-const MAX_DPR = qn('dpr', 1.5);
-
-// ---------- Shader helpers ----------
-function compile(type: number, src: string): WebGLShader {
+function compile(type: number, src: string) {
   const s = G.createShader(type)!;
-  G.shaderSource(s, src);
-  G.compileShader(s);
-  if (!G.getShaderParameter(s, G.COMPILE_STATUS)) throw new Error(G.getShaderInfoLog(s) ?? 'shader compile error');
+  G.shaderSource(s, src); G.compileShader(s);
+  if (!G.getShaderParameter(s, G.COMPILE_STATUS)) throw new Error(G.getShaderInfoLog(s) ?? 'shader error');
   return s;
 }
-
 class Program {
   prog: WebGLProgram;
-  uniforms = new Map<string, WebGLUniformLocation>();
-  constructor(frag: string, vert: string = VERT, attribs: string[] = ['aPos']) {
+  u = new Map<string, WebGLUniformLocation>();
+  constructor(vs: string, fs: string, attribs: string[]) {
     const p = G.createProgram()!;
-    G.attachShader(p, compile(G.VERTEX_SHADER, vert));
-    G.attachShader(p, compile(G.FRAGMENT_SHADER, frag));
-    attribs.forEach((name, i) => G.bindAttribLocation(p, i, name));
+    G.attachShader(p, compile(G.VERTEX_SHADER, vs)); G.attachShader(p, compile(G.FRAGMENT_SHADER, fs));
+    attribs.forEach((a, i) => G.bindAttribLocation(p, i, a));
     G.linkProgram(p);
     if (!G.getProgramParameter(p, G.LINK_STATUS)) throw new Error(G.getProgramInfoLog(p) ?? 'link error');
     this.prog = p;
     const n = G.getProgramParameter(p, G.ACTIVE_UNIFORMS) as number;
     for (let i = 0; i < n; i++) {
-      const info = G.getActiveUniform(p, i)!;
-      this.uniforms.set(info.name, G.getUniformLocation(p, info.name)!);
+      const name = G.getActiveUniform(p, i)!.name;
+      this.u.set(name.replace(/\[0\]$/, ''), G.getUniformLocation(p, name)!);
     }
   }
   use() { G.useProgram(this.prog); return this; }
-  f(name: string, v: number) { const u = this.uniforms.get(name); if (u) G.uniform1f(u, v); return this; }
-  i(name: string, v: number) { const u = this.uniforms.get(name); if (u) G.uniform1i(u, v); return this; }
-  v2(name: string, x: number, y: number) { const u = this.uniforms.get(name); if (u) G.uniform2f(u, x, y); return this; }
-  v3(name: string, x: number, y: number, z: number) { const u = this.uniforms.get(name); if (u) G.uniform3f(u, x, y, z); return this; }
-  m4(name: string, m: Mat4) { G.uniformMatrix4fv(this.uniforms.get(name)!, false, m); return this; }
-  tex(name: string, unit: number) { const u = this.uniforms.get(name); if (u) G.uniform1i(u, unit); return this; }
+  f(n: string, v: number) { const l = this.u.get(n); if (l) G.uniform1f(l, v); return this; }
+  i(n: string, v: number) { const l = this.u.get(n); if (l) G.uniform1i(l, v); return this; }
+  v2(n: string, a: number, b: number) { const l = this.u.get(n); if (l) G.uniform2f(l, a, b); return this; }
+  v3(n: string, v: ArrayLike<number>) { const l = this.u.get(n); if (l) G.uniform3f(l, v[0], v[1], v[2]); return this; }
+  v4a(n: string, v: Float32Array) { const l = this.u.get(n); if (l) G.uniform4fv(l, v); return this; }
+  v2a(n: string, v: Float32Array) { const l = this.u.get(n); if (l) G.uniform2fv(l, v); return this; }
+  m4(n: string, m: Mat4) { const l = this.u.get(n); if (l) G.uniformMatrix4fv(l, false, m); return this; }
 }
 
-// Fullscreen quad
-const quadVao = G.createVertexArray()!;
-G.bindVertexArray(quadVao);
-const vbo = G.createBuffer()!;
-G.bindBuffer(G.ARRAY_BUFFER, vbo);
-G.bufferData(G.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), G.STATIC_DRAW);
-G.enableVertexAttribArray(0);
-G.vertexAttribPointer(0, 2, G.FLOAT, false, 0, 0);
+let pSky: Program, pOcean: Program, pSolid: Program, pSpray: Program, pRain: Program, pGlow: Program, pBolt: Program, pBeam: Program, pWake: Program, pShift: Program;
+try {
+  pSky = new Program(S.VS_QUAD, S.FS_SKY, ['aPos']);
+  pOcean = new Program(S.VS_OCEAN, S.FS_OCEAN, ['aGrid']);
+  pSolid = new Program(S.VS_SOLID, S.FS_SOLID, ['aPos', 'aCol']);
+  pSpray = new Program(S.VS_SPRAY, S.FS_SPRAY, ['aP']);
+  pRain = new Program(S.VS_RAIN, S.FS_RAIN, []);
+  pGlow = new Program(S.VS_GLOW, S.FS_GLOW, ['aCenter', 'aCorner', 'aCol']);
+  pBolt = new Program(S.VS_BOLT, S.FS_BOLT, ['aPos', 'aU']);
+  pBeam = new Program(S.VS_BEAM, S.FS_BEAM, ['aP']);
+  pWake = new Program(S.VS_QUAD, S.FS_WAKE, ['aPos']);
+  pShift = new Program(S.VS_QUAD, S.FS_SHIFT, ['aPos']);
+} catch (e) { fail('Could not start the graphics: ' + (e as Error).message); throw e; }
 
-// Ocean mesh: a grid in uv space that covers [-3, 4] with density concentrated on the
-// simulation window [0, 1]; outside the window only the analytic swell is rendered.
-const meshVao = G.createVertexArray()!;
-let meshIndexCount = 0;
-function buildMesh(nx: number, ny: number) {
-  G.bindVertexArray(meshVao);
-  const warp = (t: number) => { const x = 2 * t - 1; return 0.5 + x * (0.5 + 3.0 * x * x * x * x); };
-  const verts = new Float32Array((nx + 1) * (ny + 1) * 2);
+// ---------- Geometry ----------
+function vao(layout: number[], data: Float32Array | null, usage: number = G.STATIC_DRAW) {
+  const v = G.createVertexArray()!; G.bindVertexArray(v);
+  const b = G.createBuffer()!; G.bindBuffer(G.ARRAY_BUFFER, b);
+  if (data) G.bufferData(G.ARRAY_BUFFER, data, usage);
+  const per = layout.reduce((a, n) => a + n, 0);
+  let off = 0;
+  layout.forEach((n, i) => { G.enableVertexAttribArray(i); G.vertexAttribPointer(i, n, G.FLOAT, false, per * 4, off); off += n * 4; });
+  G.bindVertexArray(null);
+  return { vao: v, buf: b, count: data ? data.length / per : 0 };
+}
+const quad = vao([2], new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]));
+const solid = (d: number[]) => vao([3, 3], new Float32Array(d));
+
+// Polar ocean grid centred on the camera, dense near and coarse toward the horizon.
+const ocean = (() => {
+  const NR = isMobile ? 120 : 170, NS = isMobile ? 144 : 200, RMAX = 7000, a = 6, ea = Math.exp(a) - 1;
+  const verts = new Float32Array((NR + 1) * NS * 3);
   let k = 0;
-  for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) { verts[k++] = warp(i / nx); verts[k++] = warp(j / ny); }
-  const idx = new Uint32Array(nx * ny * 6);
+  for (let i = 0; i <= NR; i++) {
+    const t = i / NR, r = RMAX * (Math.exp(a * t) - 1) / ea, dr = RMAX * a * Math.exp(a * t) / ea / NR;
+    const sp = Math.max(dr, 2 * Math.PI * r / NS);
+    for (let j = 0; j < NS; j++) { const ang = (j / NS) * Math.PI * 2; verts[k++] = r * Math.cos(ang); verts[k++] = r * Math.sin(ang); verts[k++] = sp; }
+  }
+  const idx = new Uint32Array(NR * NS * 6);
   k = 0;
-  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    const a = j * (nx + 1) + i, b = a + 1, c = a + nx + 1, d = c + 1;
-    idx[k++] = a; idx[k++] = b; idx[k++] = c; idx[k++] = b; idx[k++] = d; idx[k++] = c;
+  for (let i = 0; i < NR; i++) for (let j = 0; j < NS; j++) {
+    const p = i * NS + j, q = i * NS + (j + 1) % NS, r = (i + 1) * NS + j, s = (i + 1) * NS + (j + 1) % NS;
+    idx[k++] = p; idx[k++] = q; idx[k++] = s; idx[k++] = p; idx[k++] = s; idx[k++] = r;
   }
-  const vb = G.createBuffer()!;
-  G.bindBuffer(G.ARRAY_BUFFER, vb);
-  G.bufferData(G.ARRAY_BUFFER, verts, G.STATIC_DRAW);
-  G.enableVertexAttribArray(0);
-  G.vertexAttribPointer(0, 2, G.FLOAT, false, 0, 0);
-  const ib = G.createBuffer()!;
-  G.bindBuffer(G.ELEMENT_ARRAY_BUFFER, ib);
-  G.bufferData(G.ELEMENT_ARRAY_BUFFER, idx, G.STATIC_DRAW);
-  meshIndexCount = idx.length;
-  G.bindVertexArray(quadVao);
-}
+  const o = vao([3], verts);
+  G.bindVertexArray(o.vao);
+  const ib = G.createBuffer()!; G.bindBuffer(G.ELEMENT_ARRAY_BUFFER, ib); G.bufferData(G.ELEMENT_ARRAY_BUFFER, idx, G.STATIC_DRAW);
+  G.bindVertexArray(null);
+  return { vao: o.vao, count: idx.length };
+})();
 
-// Boat: motor launch with rounded hull (white topsides over a red bottom), sheer line rising to
-// the bow, deck with cockpit, cabin with window band and raked windshield, roof and mast.
-// Flat shaded. Local frame: x forward, y starboard, z up; z = 0 is the waterline.
-const boatVao = G.createVertexArray()!;
-let boatVertCount = 0;
-function buildBoat() {
-  const v: number[] = [];
-  type P = [number, number, number];
-  const tri = (a: P, b: P, c: P, col: P) => { for (const q of [a, b, c]) v.push(...q, ...col); };
-  const quad = (a: P, b: P, c: P, d: P, col: P) => { tri(a, b, c, col); tri(a, c, d, col); };
-  const box = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number, col: P, top: P = col) => {
-    quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], col);
-    quad([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], col);
-    quad([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], col);
-    quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], col);
-    quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], top);
-  };
-  const BOTTOM: P = [0.70, 0.14, 0.10], TOPSIDE: P = [0.96, 0.96, 0.94], STRIPE: P = [0.10, 0.22, 0.40];
-  const DECK: P = [0.80, 0.64, 0.42], COCKPIT: P = [0.55, 0.42, 0.28], CABIN: P = [0.97, 0.97, 0.95];
-  const GLASS: P = [0.15, 0.22, 0.30], ROOF: P = [0.78, 0.78, 0.74], METAL: P = [0.62, 0.64, 0.68];
-  const N = 18;
-  const sect = (i: number) => {
-    const t = i / N;                                   // 0 = stern, 1 = bow
-    const x = -0.5 + t;
-    const w = 0.32 * Math.pow(Math.sin(Math.PI * (0.10 + 0.90 * t * 0.93)), 0.65) * (1 - 0.3 * t * t);
-    const k = 0.15 * (0.55 + 0.45 * Math.sin(Math.PI * Math.min(t * 1.2, 1))) * (1 - 0.7 * t * t * t);
-    const g = 0.15 + 0.10 * t * t;                     // sheer rises toward the bow
-    return {
-      GL: [x, -w, g] as P, GR: [x, w, g] as P,
-      SL: [x, -w * 1.02, 0.03] as P, SR: [x, w * 1.02, 0.03] as P,
-      CL: [x, -w * 0.97, -0.02] as P, CR: [x, w * 0.97, -0.02] as P,
-      BL: [x, -w * 0.55, -k * 0.75] as P, BR: [x, w * 0.55, -k * 0.75] as P,
-      K: [x, 0, -k] as P,
-    };
-  };
-  const secs = Array.from({ length: N + 1 }, (_, i) => sect(i));
-  for (let i = 0; i < N; i++) {
-    const a = secs[i], b = secs[i + 1];
-    quad(a.GL, a.SL, b.SL, b.GL, TOPSIDE); quad(a.GR, b.GR, b.SR, a.SR, TOPSIDE);
-    quad(a.SL, a.CL, b.CL, b.SL, STRIPE);  quad(a.SR, b.SR, b.CR, a.CR, STRIPE);
-    quad(a.CL, a.BL, b.BL, b.CL, BOTTOM);  quad(a.CR, b.CR, b.BR, a.BR, BOTTOM);
-    quad(a.BL, a.K, b.K, b.BL, BOTTOM);    quad(a.BR, b.BR, b.K, a.K, BOTTOM);
-    quad(a.GL, b.GL, b.GR, a.GR, DECK);
+const land = solid(buildLand());
+const boatMesh = solid(buildBoatMesh());
+const wheelMesh = solid(buildWheelMesh());
+const buoyMeshes = [0, 1, 2].map((k) => solid(buildBuoy(k as 0 | 1 | 2)));
+
+// Lighthouse beam: two long cones along +x and -x.
+const beam = (() => {
+  const L = 1800, Rb = L * Math.tan(3 * Math.PI / 180), seg = 16, d: number[] = [];
+  for (const sgn of [1, -1]) for (let i = 0; i < seg; i++) {
+    const a0 = i / seg * Math.PI * 2, a1 = (i + 1) / seg * Math.PI * 2;
+    d.push(0, 0, 0, 0, sgn * L, Math.cos(a0) * Rb, Math.sin(a0) * Rb, 1, sgn * L, Math.cos(a1) * Rb, Math.sin(a1) * Rb, 1);
   }
-  const st = secs[0]; // transom
-  for (const [p0, p1] of [[st.GL, st.SL], [st.SL, st.CL], [st.CL, st.BL], [st.BL, st.K], [st.K, st.BR], [st.BR, st.CR], [st.CR, st.SR], [st.SR, st.GR]] as [P, P][]) {
-    tri([st.GL[0], 0, 0.1], p0, p1, TOPSIDE);
-  }
-  tri(st.GL, [st.GL[0], 0, 0.1], st.GR, TOPSIDE);
-  box(-0.47, -0.18, -0.2, 0.2, 0.08, 0.151, COCKPIT);
-  const cx0 = -0.18, cx1 = 0.16, cy = 0.2, g0 = 0.15;
-  box(cx0, cx1, -cy, cy, g0, g0 + 0.12, CABIN);
-  box(cx0 + 0.01, cx1 - 0.03, -cy + 0.005, cy - 0.005, g0 + 0.12, g0 + 0.22, GLASS);
-  quad([cx1 - 0.03, -cy, g0 + 0.12], [cx1 + 0.07, -cy * 0.9, g0 + 0.12], [cx1 - 0.03, -cy * 0.9, g0 + 0.24], [cx1 - 0.03, -cy, g0 + 0.24], GLASS);
-  quad([cx1 - 0.03, cy, g0 + 0.12], [cx1 - 0.03, cy, g0 + 0.24], [cx1 - 0.03, cy * 0.9, g0 + 0.24], [cx1 + 0.07, cy * 0.9, g0 + 0.12], GLASS);
-  quad([cx1 + 0.07, -cy * 0.9, g0 + 0.12], [cx1 + 0.07, cy * 0.9, g0 + 0.12], [cx1 - 0.03, cy * 0.9, g0 + 0.24], [cx1 - 0.03, -cy * 0.9, g0 + 0.24], GLASS);
-  box(cx0 - 0.02, cx1 - 0.01, -cy - 0.02, cy + 0.02, g0 + 0.22, g0 + 0.245, ROOF);
-  // Flybridge rail on the roof (the helm camera sits just behind it) and a stern mast.
-  box(cx0 + 0.01, cx1 - 0.02, -cy - 0.015, -cy - 0.005, g0 + 0.245, g0 + 0.30, METAL);
-  box(cx0 + 0.01, cx1 - 0.02, cy + 0.005, cy + 0.015, g0 + 0.245, g0 + 0.30, METAL);
-  box(cx1 - 0.03, cx1 - 0.02, -cy - 0.015, cy + 0.015, g0 + 0.245, g0 + 0.30, METAL);
-  box(cx1 - 0.06, cx1 - 0.05, -0.005, 0.005, g0 + 0.245, g0 + 0.40, METAL);
-  box(cx1 - 0.065, cx1 - 0.045, -0.01, 0.01, g0 + 0.40, g0 + 0.42, [1.0, 0.3, 0.2]);
-  box(0.30, 0.44, -0.012, 0.012, 0.25, 0.27, METAL);
+  return vao([4], new Float32Array(d));
+})();
+const glowBuf = vao([3, 3, 4], null);
+const boltBuf = vao([3, 1], null);
+const MAXP = isMobile ? 500 : 900;
+const sprayPos = new Float32Array(MAXP * 4), sprayVel = new Float32Array(MAXP * 3);
+const sprayBuf = vao([4], sprayPos, G.DYNAMIC_DRAW);
+const rainVao = G.createVertexArray()!;
 
-  G.bindVertexArray(boatVao);
-  const buf = G.createBuffer()!;
-  G.bindBuffer(G.ARRAY_BUFFER, buf);
-  G.bufferData(G.ARRAY_BUFFER, new Float32Array(v), G.STATIC_DRAW);
-  G.enableVertexAttribArray(0); G.vertexAttribPointer(0, 3, G.FLOAT, false, 24, 0);
-  G.enableVertexAttribArray(1); G.vertexAttribPointer(1, 3, G.FLOAT, false, 24, 12);
-  boatVertCount = v.length / 6;
-  G.bindVertexArray(quadVao);
-}
-buildBoat();
+// ---------- Textures ----------
+const shoreData = buildShoreMap();
+const shoreTex = G.createTexture()!;
+G.bindTexture(G.TEXTURE_2D, shoreTex);
+G.pixelStorei(G.UNPACK_ALIGNMENT, 1);
+G.texImage2D(G.TEXTURE_2D, 0, G.R8, SHORE.res, SHORE.res, 0, G.RED, G.UNSIGNED_BYTE, shoreData);
+G.texParameteri(G.TEXTURE_2D, G.TEXTURE_MIN_FILTER, G.LINEAR); G.texParameteri(G.TEXTURE_2D, G.TEXTURE_MAG_FILTER, G.LINEAR);
+G.texParameteri(G.TEXTURE_2D, G.TEXTURE_WRAP_S, G.CLAMP_TO_EDGE); G.texParameteri(G.TEXTURE_2D, G.TEXTURE_WRAP_T, G.CLAMP_TO_EDGE);
 
-// Spray particles: N particles stored in two W x H textures.
-const PART_W = 128, PART_H = isMobile ? 32 : 64, PART_N = PART_W * PART_H;
-const partVao = G.createVertexArray()!; // no attributes; uses gl_VertexID
-
-// ---------- Framebuffers ----------
-interface FBO { tex: WebGLTexture; fb: WebGLFramebuffer; w: number; h: number; attach(unit: number): number; }
-interface DoubleFBO { read: FBO; write: FBO; w: number; h: number; swap(): void; }
-
-function createFBO(w: number, h: number): FBO {
+interface RT { tex: WebGLTexture; fb: WebGLFramebuffer; }
+function makeRT(size: number, internal: number, type: number): RT | null {
   const tex = G.createTexture()!;
-  G.activeTexture(G.TEXTURE0);
   G.bindTexture(G.TEXTURE_2D, tex);
-  G.texParameteri(G.TEXTURE_2D, G.TEXTURE_MIN_FILTER, FMT.filter);
-  G.texParameteri(G.TEXTURE_2D, G.TEXTURE_MAG_FILTER, FMT.filter);
-  G.texParameteri(G.TEXTURE_2D, G.TEXTURE_WRAP_S, G.CLAMP_TO_EDGE);
-  G.texParameteri(G.TEXTURE_2D, G.TEXTURE_WRAP_T, G.CLAMP_TO_EDGE);
-  G.texImage2D(G.TEXTURE_2D, 0, FMT.internal, w, h, 0, FMT.format, FMT.type, null);
+  G.texImage2D(G.TEXTURE_2D, 0, internal, size, size, 0, G.RGBA, type, null);
+  G.texParameteri(G.TEXTURE_2D, G.TEXTURE_MIN_FILTER, G.LINEAR); G.texParameteri(G.TEXTURE_2D, G.TEXTURE_MAG_FILTER, G.LINEAR);
+  G.texParameteri(G.TEXTURE_2D, G.TEXTURE_WRAP_S, G.CLAMP_TO_EDGE); G.texParameteri(G.TEXTURE_2D, G.TEXTURE_WRAP_T, G.CLAMP_TO_EDGE);
   const fb = G.createFramebuffer()!;
   G.bindFramebuffer(G.FRAMEBUFFER, fb);
   G.framebufferTexture2D(G.FRAMEBUFFER, G.COLOR_ATTACHMENT0, G.TEXTURE_2D, tex, 0);
-  if (G.checkFramebufferStatus(G.FRAMEBUFFER) !== G.FRAMEBUFFER_COMPLETE) throw new Error('FBO incomplete');
-  G.viewport(0, 0, w, h);
-  G.clearColor(0, 0, 0, 0);
-  G.clear(G.COLOR_BUFFER_BIT);
-  return {
-    tex, fb, w, h,
-    attach(unit: number) { G.activeTexture(G.TEXTURE0 + unit); G.bindTexture(G.TEXTURE_2D, tex); return unit; },
-  };
+  const ok = G.checkFramebufferStatus(G.FRAMEBUFFER) === G.FRAMEBUFFER_COMPLETE;
+  G.clearColor(0, 0, 0, 0); G.clear(G.COLOR_BUFFER_BIT);
+  G.bindFramebuffer(G.FRAMEBUFFER, null);
+  return ok ? { tex, fb } : null;
 }
-function createDoubleFBO(w: number, h: number): DoubleFBO {
-  let a = createFBO(w, h);
-  let b = createFBO(w, h);
-  return {
-    w, h,
-    get read() { return a; }, get write() { return b; },
-    swap() { const t = a; a = b; b = t; },
-  };
+const WAKE = { size: 256, res: 256, ox: 0, oy: -360 };
+const mkWake = () => makeRT(WAKE.res, G.RGBA16F, G.HALF_FLOAT) ?? makeRT(WAKE.res, G.RGBA8, G.UNSIGNED_BYTE)!;
+let wakeA = mkWake(), wakeB = mkWake();
+
+// ---------- Small matrix helpers ----------
+function fromAxes(X: V3, Y: V3, Z: V3, p: V3): Mat4 {
+  return new Float32Array([X[0], X[1], X[2], 0, Y[0], Y[1], Y[2], 0, Z[0], Z[1], Z[2], 0, p[0], p[1], p[2], 1]);
 }
-interface MRT { a: FBO; b: FBO; fb: WebGLFramebuffer; }
-function createMRT(w: number, h: number): MRT {
-  const a = createFBO(w, h), b = createFBO(w, h);
-  const fb = G.createFramebuffer()!;
-  G.bindFramebuffer(G.FRAMEBUFFER, fb);
-  G.framebufferTexture2D(G.FRAMEBUFFER, G.COLOR_ATTACHMENT0, G.TEXTURE_2D, a.tex, 0);
-  G.framebufferTexture2D(G.FRAMEBUFFER, G.COLOR_ATTACHMENT1, G.TEXTURE_2D, b.tex, 0);
-  G.drawBuffers([G.COLOR_ATTACHMENT0, G.COLOR_ATTACHMENT1]);
-  if (G.checkFramebufferStatus(G.FRAMEBUFFER) !== G.FRAMEBUFFER_COMPLETE) throw new Error('MRT incomplete');
-  return { a, b, fb };
+function rigidInverse(X: V3, Y: V3, Z: V3, p: V3): Mat4 {
+  const d = (a: V3) => -(a[0] * p[0] + a[1] * p[1] + a[2] * p[2]);
+  return new Float32Array([X[0], Y[0], Z[0], 0, X[1], Y[1], Z[1], 0, X[2], Y[2], Z[2], 0, d(X), d(Y), d(Z), 1]);
 }
-let partRead = createMRT(PART_W, PART_H), partWrite = createMRT(PART_W, PART_H);
+const IDENT = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 
-function blit(target: FBO | null) {
-  G.bindVertexArray(quadVao);
-  if (target) { G.bindFramebuffer(G.FRAMEBUFFER, target.fb); G.viewport(0, 0, target.w, target.h); }
-  else { G.bindFramebuffer(G.FRAMEBUFFER, null); G.viewport(0, 0, canvas.width, canvas.height); }
-  G.drawArrays(G.TRIANGLE_STRIP, 0, 4);
-}
-
-// ---------- Programs ----------
-const pAdvect = new Program(ADVECT);
-const pSplat = new Program(SPLAT);
-const pDiv = new Program(DIVERGENCE);
-const pJacobi = new Program(JACOBI);
-const pGrad = new Program(GRADIENT_SUBTRACT);
-const pBound = new Program(BOUNDARY);
-const pWave = new Program(WAVE);
-const pDisplay = new Program(DISPLAY);
-const pMesh = new Program(FRAG3D, VERT3D, ['aUv']);
-const pBoat = new Program(FRAG_BOAT, VERT_BOAT, ['aPos', 'aCol']);
-const pBoatInfo = new Program(BOAT_INFO);
-const pPartUpdate = new Program(PARTICLE_UPDATE);
-const pBallPush = new Program(BALL_PUSH);
-const pBallVel = new Program(BALL_VEL);
-const pPart = new Program(FRAG_PARTICLE, VERT_PARTICLE, []);
-const pShift = new Program(SHIFT);
-const pSky = new Program(SKY_PASS);
-
-// ---------- State ----------
-// dye: 2D view's surface shading field. wave: 3D height field (x = h, y = dh/dt, z = splash).
-let velocity!: DoubleFBO, pressure!: DoubleFBO, divergence!: FBO, viscB!: FBO, dye!: DoubleFBO, wave!: DoubleFBO;
-const boatState = createFBO(1, 1);   // (x, y, heading, speed uv/frame) uploaded from the CPU
-const boatInfo = createFBO(2, 1);    // (z, pitch, roll) and water velocity, read back to the CPU
-const BOAT_SCALE = 0.34;
-const BOAT_DRAFT = 0.15; // keel depth in boat units
-let simW = 0, simH = 0, dyeW = 0, dyeH = 0;
-let aspect = 1;
-// World origin of the sim window (the window scrolls to follow the boat).
-const origin = { x: 0, y: 0 };
-
-function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-  const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
-  if (w === 0 || h === 0) return;
-  if (canvas.width === w && canvas.height === h && velocity) return;
-  canvas.width = w; canvas.height = h;
-  aspect = w / h;
-  const dims = (res: number) => aspect >= 1
-    ? [Math.round(res * aspect), res] : [res, Math.round(res / aspect)];
-  [simW, simH] = dims(SIM_RES);
-  [dyeW, dyeH] = dims(DYE_RES);
-  velocity = createDoubleFBO(simW, simH);
-  pressure = createDoubleFBO(simW, simH);
-  divergence = createFBO(simW, simH);
-  viscB = createFBO(simW, simH);
-  dye = createDoubleFBO(dyeW, dyeH);
-  wave = createDoubleFBO(dyeW, dyeH);
-  const [mx, my] = dims(MESH_RES);
-  buildMesh(mx, my);
-}
-window.addEventListener('resize', resize);
-resize();
-
-// ---------- UI ----------
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const viscSlider = $<HTMLInputElement>('visc');
-const viscOut = $<HTMLOutputElement>('viscOut');
-const splatSlider = $<HTMLInputElement>('splat');
-const heightSlider = $<HTMLInputElement>('height');
-const swellSlider = $<HTMLInputElement>('swell');
-const curlSlider = $<HTMLInputElement>('curl');
-const speedSlider = $<HTMLInputElement>('speed');
-const speedOut = $<HTMLOutputElement>('speedOut');
-const boatBtn = $<HTMLButtonElement>('boat');
-const soundBtn = $<HTMLButtonElement>('sound');
-$('hideui').addEventListener('click', () => document.body.classList.add('hideui'));
-$('showui').addEventListener('click', () => document.body.classList.remove('hideui'));
-const dampButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('#damp button'));
-const viewButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('#view button'));
-const hint = $<HTMLDivElement>('hint');
-const knotsEl = $<HTMLDivElement>('knots');
-const hdgEl = $<HTMLDivElement>('hdg');
-const fpsEl = $<HTMLDivElement>('fps');
-
-type View = '2d' | '3d' | 'helm';
-let view: View = '2d';
-const view3D = () => view !== '2d';
-let showBoat = true;
+// ---------- Game state ----------
+const boat = new Boat();
 const audio = new SeaAudio();
-boatBtn.addEventListener('click', () => { showBoat = !showBoat; boatBtn.classList.toggle('active', showBoat); });
-soundBtn.addEventListener('click', () => soundBtn.classList.toggle('active', audio.toggle()));
-function speedFactor() { return Number(speedSlider.value) / 100; }
-function updateSpeedLabel() { speedOut.value = speedFactor().toFixed(1) + 'x'; }
-speedSlider.addEventListener('input', updateSpeedLabel);
-updateSpeedLabel();
+let playing = false;
+let time = 0;
+let camMode: 'bridge' | 'chase' = 'bridge';
+const atm = { s: stormAt(boat.x, boat.y), fog: [0, 0, 0] as V3, sky: [0, 0, 0] as V3, sun: [0, 0, 0] as V3, ambT: [0, 0, 0] as V3, ambB: [0, 0, 0] as V3, fogDen: 0, rain: 0, wind: 0 };
+const windVec: [number, number] = [Math.cos(WIND_DIR), Math.sin(WIND_DIR)];
 
-// [velocity dissipation, wave damping]
-const DAMP_LEVELS: [number, number][] = [[1.0, 0.998], [0.995, 0.99], [0.975, 0.97], [0.93, 0.92]];
-let dampLevel = 1;
-let paused = false;
-
-function viscosity(): number {
-  const t = Number(viscSlider.value) / 100;
-  return 3 * t * t;
-}
-function updateViscLabel() { viscOut.value = viscosity().toFixed(3); }
-viscSlider.addEventListener('input', updateViscLabel);
-updateViscLabel();
-
-dampButtons.forEach((b) => b.addEventListener('click', () => {
-  dampLevel = Number(b.dataset.damp);
-  dampButtons.forEach((x) => x.classList.toggle('active', x === b));
-}));
-const HINTS: Record<View, string> = {
-  '2d': 'Drag with the mouse (or touch) to push the water. Walls reflect.',
-  '3d': 'Drag to push water. Two fingers / right-drag to orbit, pinch or wheel to zoom.',
-  'helm': 'W/S or ↑/↓ throttle, A/D or ←/→ steer. Touch: left half steers, right half is the throttle.',
-};
-function setView(v: View) {
-  view = v;
-  viewButtons.forEach((x) => x.classList.toggle('active', x.dataset.view === v));
-  document.body.classList.toggle('view3d', view3D());
-  document.body.classList.toggle('helm', v === 'helm');
-  hint.textContent = HINTS[v];
-  pointers.clear();
-  input.thr = 0; input.str = 0;
-  if (v === 'helm' && showBoat === false) { showBoat = true; boatBtn.classList.add('active'); }
-}
-viewButtons.forEach((b) => b.addEventListener('click', () => setView(b.dataset.view as View)));
-function clearAll() {
-  for (const f of [velocity.read, velocity.write, pressure.read, pressure.write, divergence, viscB, dye.read, dye.write,
-    wave.read, wave.write, partRead.a, partRead.b, partWrite.a, partWrite.b]) {
-    G.bindFramebuffer(G.FRAMEBUFFER, f.fb); G.clearColor(0, 0, 0, 0); G.clear(G.COLOR_BUFFER_BIT);
-  }
-  boat.x = 0.5; boat.y = 0.5; boat.vx = 0; boat.vy = 0; boat.yawRate = 0;
-}
-$('reset').addEventListener('click', clearAll);
-const pauseBtn = $<HTMLButtonElement>('pause');
-pauseBtn.addEventListener('click', () => { paused = !paused; pauseBtn.textContent = paused ? 'Resume' : 'Pause'; });
-
-function currentHeightScale() { return 0.06 + (Number(heightSlider.value) / 100) * 0.5; }
-function swellAmp() { return Number(swellSlider.value) / 100 * 0.5; } // height units at full slider
-function chop() { return Number(curlSlider.value) / 100 * 2.6; }
-let simTime = 0;
-function swellUniforms(p: Program) {
-  return p.f('uSwell', view3D() ? swellAmp() : 0).f('uSimTime', simTime).f('uChop', chop()).v2('uOrigin', origin.x, origin.y);
+function updateAtmosphere(dt: number) {
+  atm.s += (stormAt(boat.x, boat.y) - atm.s) * (1 - Math.exp(-dt / 4));
+  const a = 0.15 + 0.85 * atm.s;
+  atm.fog = mix3([0.3, 0.34, 0.37], [0.13, 0.155, 0.18], a);
+  atm.sky = mix3([0.19, 0.24, 0.3], [0.045, 0.055, 0.07], a);
+  atm.sun = mix3([0.62, 0.5, 0.34], [0.08, 0.08, 0.09], a);
+  atm.ambT = mix3([0.3, 0.34, 0.38], [0.13, 0.15, 0.18], a);
+  atm.ambB = [atm.ambT[0] * 0.4, atm.ambT[1] * 0.4, atm.ambT[2] * 0.45];
+  atm.fogDen = mix(0.00045, 0.0017, a);
+  atm.rain = smoothstep(0.05, 1, a);
+  atm.wind = mix(0.2, 1, a);
 }
 
-// ---------- Boat (CPU physics) ----------
-const boat = {
-  x: 0.5, y: 0.5,            // position in window uv
-  heading: Math.PI / 2,      // radians, 0 = +x (east), pi/2 = +y (north / up the screen)
-  vx: 0, vy: 0,              // velocity, world units per frame
-  yawRate: 0, bank: 0,
-  z: 0, pitch: 0, roll: 0,   // from the GPU readback (world z of the hull centre, radians)
-  cx: 0, cy: 0,              // displaced hull centre xy (world, from the GPU readback)
-  zHist: [0, 0, 0],
-  curX: 0, curY: 0,          // water velocity under the hull (sim texels / frame)
-  slam: 0,                   // hull impact this frame, 0..1
-};
-const ctrl = { throttle: 0, steer: 0 };   // smoothed
-const input = { thr: 0, str: 0 };         // raw target from keys / touch
+// ---------- Input ----------
 const keys = new Set<string>();
-const TOP_SPEED = 0.012;                   // world units / frame at full throttle
+let touchRudder: number | null = null;
+const look = { yaw: 0, pitch: 0, active: false };
+interface Ptr { zone: 'steer' | 'throttle' | 'look'; x0: number; y0: number; x: number; y: number; lever0: number; }
+const ptrs = new Map<number, Ptr>();
+window.addEventListener('keydown', (e) => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  keys.add(k);
+  if (!playing) return;
+  if (k === 'c') toggleCam();
+  if (k === 'm') toggleMute();
+  if (k === 'x' || k === ' ') boat.lever = 0;
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(k)) e.preventDefault();
+});
+window.addEventListener('keyup', (e) => keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
+window.addEventListener('blur', () => keys.clear());
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('pointerdown', (e) => {
+  if (!playing) return;
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic */ }
+  const zone = e.pointerType === 'mouse' ? 'look' : e.clientX < innerWidth / 2 ? 'steer' : 'throttle';
+  ptrs.set(e.pointerId, { zone, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, lever0: boat.lever });
+  if (zone === 'look') look.active = true;
+  document.body.classList.remove('hint');
+});
+canvas.addEventListener('pointermove', (e) => {
+  const p = ptrs.get(e.pointerId);
+  if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  p.x = e.clientX; p.y = e.clientY;
+  if (p.zone === 'look') { look.yaw = clamp(look.yaw - dx * 0.005, -2.6, 2.6); look.pitch = clamp(look.pitch - dy * 0.004, -0.7, 0.6); }
+  else if (p.zone === 'steer') touchRudder = clamp(-(p.x - p.x0) / (innerWidth * 0.14), -1, 1);
+  else boat.lever = clamp(p.lever0 - (p.y - p.y0) / (innerHeight * 0.32), -0.5, 1);
+});
+const endPtr = (e: PointerEvent) => {
+  const p = ptrs.get(e.pointerId);
+  if (!p) return;
+  if (p.zone === 'steer') touchRudder = null;
+  if (p.zone === 'look') look.active = false;
+  ptrs.delete(e.pointerId);
+};
+canvas.addEventListener('pointerup', endPtr);
+canvas.addEventListener('pointercancel', endPtr);
 
-const boatBuf = HALF ? new Uint16Array(4) : new Float32Array(4);
-function uploadBoat() {
-  const sp = Math.hypot(boat.vx, boat.vy) * 0.5; // uv-ish units per frame for the wake shader
-  const vals = [boat.x, boat.y, boat.heading, sp];
-  if (HALF) for (let i = 0; i < 4; i++) (boatBuf as Uint16Array)[i] = toHalf(vals[i]);
-  else for (let i = 0; i < 4; i++) (boatBuf as Float32Array)[i] = vals[i];
-  G.bindTexture(G.TEXTURE_2D, boatState.tex);
-  G.texSubImage2D(G.TEXTURE_2D, 0, 0, 0, 1, 1, G.RGBA, FMT.type, boatBuf);
-}
-const infoBuf = HALF ? new Uint16Array(8) : new Float32Array(8);
-function readBoatInfo() {
-  const hs = currentHeightScale();
-  pBoatInfo.use().f('uAspect', aspect).f('uHeightScale', hs).f('uScale', BOAT_SCALE)
-    .tex('uHeight', wave.read.attach(0)).tex('uVelocity', velocity.read.attach(1)).tex('uBoat', boatState.attach(2));
-  swellUniforms(pBoatInfo);
-  blit(boatInfo);
-  G.readPixels(0, 0, 2, 1, G.RGBA, FMT.type, infoBuf);
-  const rd = (i: number) => HALF ? fromHalf((infoBuf as Uint16Array)[i]) : (infoBuf as Float32Array)[i];
-  const z = rd(0), pitch = rd(1), roll = rd(2), cx = rd(4), cy = rd(5), wx = rd(6), wy = rd(7);
-  if ([z, pitch, roll, cx, cy, wx, wy].every(Number.isFinite)) {
-    boat.z = z; boat.pitch = pitch; boat.roll = roll; boat.curX = cx; boat.curY = cy; boat.cx = wx; boat.cy = wy;
-  }
-}
-
-function wrapAngle(a: number) { return Math.atan2(Math.sin(a), Math.cos(a)); }
-
-function boatPhysics(dt: number) {
-  const driving = view === 'helm';
-  // Smoothed controls: throttle spools up, steering is quick.
-  const tgtThr = driving ? input.thr : 0, tgtStr = driving ? input.str : 0;
-  ctrl.throttle += (tgtThr - ctrl.throttle) * (1 - Math.exp(-dt / 10));
-  ctrl.steer += (tgtStr - ctrl.steer) * (1 - Math.exp(-dt / 4));
-
-  const fx = Math.cos(boat.heading), fy = Math.sin(boat.heading);
-  const rx = fy, ry = -fx; // starboard
-  const fwdSpeed = boat.vx * fx + boat.vy * fy;
-  // Propulsion (reverse is weaker), plus surfing down wave faces.
-  const accel = ctrl.throttle * (ctrl.throttle > 0 ? 0.00042 : 0.00022);
-  const surf = -Math.sin(boat.pitch) * 0.0005;
-  boat.vx += fx * (accel + surf) * dt; boat.vy += fy * (accel + surf) * dt;
-  // Water current carries the boat.
-  boat.vx += boat.curX * (2 * aspect / simW) * 0.02 * dt; boat.vy += boat.curY * (2 / simH) * 0.02 * dt;
-  // Drag (linear + quadratic) and lateral grip so the hull slides a little in turns.
-  const sp = Math.hypot(boat.vx, boat.vy);
-  const drag = Math.min(0.95, (0.012 + sp * 1.6) * dt);
-  boat.vx *= 1 - drag; boat.vy *= 1 - drag;
-  const lat = boat.vx * rx + boat.vy * ry;
-  const grip = 1 - Math.exp(-dt / 5);
-  boat.vx -= rx * lat * grip; boat.vy -= ry * lat * grip;
-  // Steering: yaw rate builds with speed, with a little inertia. Reversing flips the helm.
-  const steerAuthority = Math.max(-1, Math.min(1, fwdSpeed / (TOP_SPEED * 0.35)));
-  const tgtYaw = ctrl.steer * 0.045 * steerAuthority;
-  boat.yawRate += (tgtYaw - boat.yawRate) * (1 - Math.exp(-dt / 6));
-  boat.heading = wrapAngle(boat.heading + boat.yawRate * dt);
-  // Bank into turns.
-  const tgtBank = -ctrl.steer * Math.min(Math.abs(fwdSpeed) / TOP_SPEED, 1) * 0.22;
-  boat.bank += (tgtBank - boat.bank) * (1 - Math.exp(-dt / 8));
-  // Integrate position (window uv).
-  boat.x += boat.vx * dt / (2 * aspect);
-  boat.y += boat.vy * dt / 2;
-  if (!driving) { // keep an idle boat inside the window without scrolling the world
-    boat.x = Math.min(0.94, Math.max(0.06, boat.x)); boat.y = Math.min(0.94, Math.max(0.06, boat.y));
-  }
-  // Hull slam: vertical acceleration of the hull centre.
-  boat.zHist.push(boat.z); boat.zHist.shift();
-  const acc = boat.zHist[2] - 2 * boat.zHist[1] + boat.zHist[0];
-  const slamNow = Math.min(Math.abs(acc) * 60, 1);
-  boat.slam = Math.max(boat.slam * Math.pow(0.85, dt), slamNow);
-}
-
-// Scroll the simulation window so the boat stays near its centre (endless ocean).
-let pendingShiftW = { x: 0, y: 0 };
-function recenterIfNeeded() {
-  if (Math.abs(boat.x - 0.5) < 0.22 && Math.abs(boat.y - 0.5) < 0.22) return;
-  const sx = 0.5 - boat.x, sy = 0.5 - boat.y;
-  const shiftW = { x: sx * 2 * aspect, y: sy * 2 };
-  for (const f of [velocity, pressure, wave, dye]) {
-    pShift.use().v2('uShift', sx, sy).tex('uSrc', f.read.attach(0));
-    blit(f.write); f.swap();
-  }
-  origin.x -= shiftW.x; origin.y -= shiftW.y;
-  boat.x = 0.5; boat.y = 0.5;
-  boat.cx += shiftW.x; boat.cy += shiftW.y;
-  pendingShiftW = shiftW; // particles are moved in the next update pass
-  for (const p of pointers.values()) { p.x += sx; p.y += sy; }
+function updateControls(dt: number) {
+  const up = keys.has('w') || keys.has('ArrowUp'), down = keys.has('s') || keys.has('ArrowDown');
+  if (up) boat.lever = Math.min(1, boat.lever + 0.5 * dt);
+  if (down) boat.lever = Math.max(-0.5, boat.lever - 0.5 * dt);
+  const kb = (keys.has('a') || keys.has('ArrowLeft') ? 1 : 0) - (keys.has('d') || keys.has('ArrowRight') ? 1 : 0);
+  const target = touchRudder ?? kb;
+  const rate = target === 0 ? 3 : touchRudder !== null ? 8 : 2.2;
+  boat.rudder += clamp(target - boat.rudder, -rate * dt, rate * dt);
+  if (!look.active) { look.yaw *= Math.exp(-dt * 2.2); look.pitch *= Math.exp(-dt * 2.2); }
 }
 
 // ---------- Camera ----------
-interface Camera { eye: [number, number, number]; fwd: [number, number, number]; right: [number, number, number]; up: [number, number, number]; fov: number; }
-const orbitCam = { yaw: 0.0, pitch: 0.95, dist: 3.2 };
-const helmCam = { yaw: Math.PI / 2, shake: 0, sx: 0, sy: 0, sz: 0 };
-const FOV = 45 * Math.PI / 180;
-function norm(v: [number, number, number]): [number, number, number] { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; }
-function cross(a: [number, number, number], b: [number, number, number]): [number, number, number] {
-  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const cam = { eye: [0, 0, 5] as V3, fwd: [1, 0, 0] as V3, right: [0, -1, 0] as V3, up: [0, 0, 1] as V3, fov: 1.2, near: 0.6, shake: 0 };
+const chase = { pos: [0, -330, 12] as V3, yaw: -Math.PI / 2 };
+const camSample = newSample();
+function updateCamera(dt: number) {
+  cam.shake *= Math.exp(-dt * 5);
+  const jit = () => (Math.random() - 0.5) * cam.shake;
+  const sp01 = Math.min(Math.hypot(boat.vx, boat.vy) / 11, 1);
+  if (!playing) {
+    // Title: a slow orbit around the boat in the bay, looking out toward the stacks.
+    const a = Math.PI / 2 + time * 0.04, Rr = 30;
+    cam.eye = [boat.x + Math.cos(a) * Rr, boat.y + Math.sin(a) * Rr, boat.z + 7];
+    const tgt: V3 = [boat.x, boat.y - 25, boat.z + 4];
+    cam.fwd = norm3(sub(tgt, cam.eye)); cam.right = norm3(cross(cam.fwd, [0, 0, 1])); cam.up = cross(cam.right, cam.fwd);
+    cam.fov = 55 * Math.PI / 180; cam.near = 1;
+    return;
+  }
+  if (camMode === 'bridge') {
+    const ax = boatAxes(boat.psi, boat.th, boat.ph);
+    cam.eye = [
+      boat.x + ax.X[0] * EYE[0] + ax.Y[0] * EYE[1] + ax.Z[0] * EYE[2] + jit(),
+      boat.y + ax.X[1] * EYE[0] + ax.Y[1] * EYE[1] + ax.Z[1] * EYE[2] + jit(),
+      boat.z + ax.X[2] * EYE[0] + ax.Y[2] * EYE[1] + ax.Z[2] * EYE[2] + jit(),
+    ];
+    // The head stabilises a little against the hull's motion and glances into turns.
+    const c = boatAxes(boat.psi + look.yaw + boat.r * 0.35, boat.th * 0.8 - 0.07 + look.pitch + jit() * 0.3, boat.ph * 0.78);
+    cam.fwd = c.X; cam.up = c.Z; cam.right = [-c.Y[0], -c.Y[1], -c.Y[2]];
+    cam.fov = (68 + 6 * sp01) * Math.PI / 180; cam.near = 0.6;
+  } else {
+    chase.yaw += Math.atan2(Math.sin(boat.psi - chase.yaw), Math.cos(boat.psi - chase.yaw)) * (1 - Math.exp(-dt * 1.6));
+    const yaw = chase.yaw + look.yaw, dist = 30, h = 9 - look.pitch * 12;
+    const want: V3 = [boat.x - Math.cos(yaw) * dist, boat.y - Math.sin(yaw) * dist, boat.z + h];
+    const kxy = 1 - Math.exp(-dt * 3), kz = 1 - Math.exp(-dt * 2);
+    chase.pos = [chase.pos[0] + (want[0] - chase.pos[0]) * kxy, chase.pos[1] + (want[1] - chase.pos[1]) * kxy, chase.pos[2] + (want[2] - chase.pos[2]) * kz];
+    const wz = sampleWater(chase.pos[0], chase.pos[1], camSample).z;
+    chase.pos[2] = Math.max(chase.pos[2], wz + 3);
+    cam.eye = [chase.pos[0] + jit(), chase.pos[1] + jit(), chase.pos[2] + jit()];
+    const tgt: V3 = [boat.x + Math.cos(boat.psi) * 8, boat.y + Math.sin(boat.psi) * 8, boat.z + 2.5];
+    cam.fwd = norm3(sub(tgt, cam.eye)); cam.right = norm3(cross(cam.fwd, [0, 0, 1])); cam.up = cross(cam.right, cam.fwd);
+    cam.fov = (60 + 6 * sp01) * Math.PI / 180; cam.near = 1;
+  }
 }
-function orbitCamera(): Camera {
-  const cp = Math.cos(orbitCam.pitch);
-  const eye: [number, number, number] = [orbitCam.dist * cp * Math.sin(orbitCam.yaw), -orbitCam.dist * cp * Math.cos(orbitCam.yaw), orbitCam.dist * Math.sin(orbitCam.pitch)];
-  const fwd = norm([-eye[0], -eye[1], -eye[2]]);
-  const right = norm(cross(fwd, [0, 0, 1]));
-  const up = cross(right, fwd);
-  return { eye, fwd, right, up, fov: FOV };
+function toggleCam() {
+  camMode = camMode === 'bridge' ? 'chase' : 'bridge';
+  $('camBtn').textContent = camMode === 'bridge' ? 'Chase cam' : 'Bridge cam';
+  chase.pos = [boat.x - Math.cos(boat.psi) * 30, boat.y - Math.sin(boat.psi) * 30, boat.z + 9];
+  chase.yaw = boat.psi;
 }
-// Boat frame from heading / pitch / roll / bank.
-function boatBasis() {
-  const h = boat.heading, p = boat.pitch, r = boat.roll + boat.bank;
-  const f: [number, number, number] = [Math.cos(h), Math.sin(h), 0];
-  const rt: [number, number, number] = [Math.sin(h), -Math.cos(h), 0];
-  const u: [number, number, number] = [0, 0, 1];
-  const fp: [number, number, number] = [f[0] * Math.cos(p) + u[0] * Math.sin(p), f[1] * Math.cos(p) + u[1] * Math.sin(p), f[2] * Math.cos(p) + u[2] * Math.sin(p)];
-  const up1: [number, number, number] = [u[0] * Math.cos(p) - f[0] * Math.sin(p), u[1] * Math.cos(p) - f[1] * Math.sin(p), u[2] * Math.cos(p) - f[2] * Math.sin(p)];
-  const rr: [number, number, number] = [rt[0] * Math.cos(r) + up1[0] * Math.sin(r), rt[1] * Math.cos(r) + up1[1] * Math.sin(r), rt[2] * Math.cos(r) + up1[2] * Math.sin(r)];
-  const uu = norm(cross(rr, fp));
-  return { f: fp, r: rr, u: uu };
+function toggleMute() { audio.setMuted(!audio.muted); $('muteBtn').textContent = audio.muted ? 'Sound' : 'Mute'; }
+
+// ---------- Spray ----------
+let sprayNext = 0;
+function emit(p: V3, v: V3, life = 1) {
+  const i = sprayNext; sprayNext = (sprayNext + 1) % MAXP;
+  sprayPos[i * 4] = p[0]; sprayPos[i * 4 + 1] = p[1]; sprayPos[i * 4 + 2] = p[2]; sprayPos[i * 4 + 3] = life;
+  sprayVel[i * 3] = v[0]; sprayVel[i * 3 + 1] = v[1]; sprayVel[i * 3 + 2] = v[2];
 }
-function boatWorld(): [number, number, number] {
-  return [boat.cx, boat.cy, boat.z];
+function emitLocal(l: V3, lv: V3, life = 1) {
+  const ax = boatAxes(boat.psi, boat.th, boat.ph);
+  const w = (a: V3): V3 => [ax.X[0] * a[0] + ax.Y[0] * a[1] + ax.Z[0] * a[2], ax.X[1] * a[0] + ax.Y[1] * a[1] + ax.Z[1] * a[2], ax.X[2] * a[0] + ax.Y[2] * a[1] + ax.Z[2] * a[2]];
+  const p = w(l), v = w(lv);
+  emit([boat.x + p[0], boat.y + p[1], boat.z + p[2]], [boat.vx + v[0], boat.vy + v[1], boat.vz + v[2]], life);
 }
-function helmCamera(dt: number): Camera {
-  // The camera heading lags the hull a little so turns feel weighty.
-  helmCam.yaw = wrapAngle(helmCam.yaw + wrapAngle(boat.heading - helmCam.yaw) * (1 - Math.exp(-dt / 7)));
-  const { f, r, u } = boatBasis();
-  const c = boatWorld();
-  const S = BOAT_SCALE;
-  const off = { x: qn('camx', -0.72) * S, z: qn('camz', 0.78) * S };
-  // Camera shake from hull slams.
-  helmCam.shake = Math.max(helmCam.shake * Math.pow(0.8, dt), boat.slam * 0.012);
-  const sh = helmCam.shake;
-  helmCam.sx += ((Math.random() - 0.5) * sh - helmCam.sx) * 0.5;
-  helmCam.sy += ((Math.random() - 0.5) * sh - helmCam.sy) * 0.5;
-  helmCam.sz += ((Math.random() - 0.5) * sh - helmCam.sz) * 0.5;
-  const eye: [number, number, number] = [
-    c[0] + f[0] * off.x + u[0] * off.z + helmCam.sx,
-    c[1] + f[1] * off.x + u[1] * off.z + helmCam.sy,
-    c[2] + f[2] * off.x + u[2] * off.z + helmCam.sz,
+const R = () => Math.random();
+function updateSpray(dt: number, inv: Mat4) {
+  const drag = Math.exp(-dt * 0.7);
+  for (let i = 0; i < MAXP; i++) {
+    if (sprayPos[i * 4 + 3] <= 0) continue;
+    sprayVel[i * 3 + 2] -= 9.81 * dt;
+    sprayVel[i * 3] *= drag; sprayVel[i * 3 + 1] *= drag;
+    const x = sprayPos[i * 4] += sprayVel[i * 3] * dt;
+    const y = sprayPos[i * 4 + 1] += sprayVel[i * 3 + 1] * dt;
+    const z = sprayPos[i * 4 + 2] += sprayVel[i * 3 + 2] * dt;
+    let life = sprayPos[i * 4 + 3] - dt / 1.7;
+    if (z < boat.z - 5) life = 0;
+    const lx = inv[0] * x + inv[4] * y + inv[8] * z + inv[12], ly = inv[1] * x + inv[5] * y + inv[9] * z + inv[13], lz = inv[2] * x + inv[6] * y + inv[10] * z + inv[14];
+    if (lx > -3.7 && lx < 0.45 && Math.abs(ly) < 1.85 && lz > 0.9 && lz < 4.1) life = 0;
+    sprayPos[i * 4 + 3] = life;
+  }
+}
+
+// ---------- Lightning ----------
+const bolt = { t: 99, I: 0, pts: [] as V3[][], mid: [0, 0, 500] as V3 };
+let nextStrike = 5, flash = 0;
+const flashDir: V3 = [0, 0, 1];
+function jagged(a: V3, b: V3, levels: number, rough: number): V3[] {
+  let pts: V3[] = [a, b];
+  for (let l = 0; l < levels; l++) {
+    const np: V3[] = [pts[0]];
+    for (let k = 0; k < pts.length - 1; k++) {
+      const p = pts[k], q = pts[k + 1], len = Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]);
+      np.push([(p[0] + q[0]) / 2 + (R() - 0.5) * len * rough, (p[1] + q[1]) / 2 + (R() - 0.5) * len * rough, (p[2] + q[2]) / 2 + (R() - 0.5) * len * 0.15], q);
+    }
+    pts = np;
+  }
+  return pts;
+}
+function strike() {
+  const away = Math.atan2(boat.y - IC.y, boat.x - IC.x) + (R() - 0.5) * 2.6;
+  const dist = mix(2600, 900, atm.s) + R() * mix(4200, 3000, atm.s);
+  const x = cam.eye[0] + Math.cos(away) * dist, y = cam.eye[1] + Math.sin(away) * dist;
+  const main = jagged([x, y, 1150], [x + (R() - 0.5) * 300, y + (R() - 0.5) * 300, 0], 7, 0.55);
+  bolt.pts = [main];
+  for (let b = 0; b < 3; b++) {
+    const s = main[Math.floor(R() * main.length * 0.6)];
+    bolt.pts.push(jagged(s, [s[0] + (R() - 0.5) * 500, s[1] + (R() - 0.5) * 500, s[2] - 200 - R() * 300], 5, 0.5));
+  }
+  bolt.mid = [x, y, 550]; bolt.t = 0;
+  bolt.I = clamp(2.4 / (1 + dist / 1500), 0.35, 1.7);
+  audio.thunder(dist);
+}
+function updateLightning(dt: number) {
+  nextStrike -= dt;
+  if (nextStrike <= 0) { strike(); nextStrike = mix(24, 3.5, atm.s) * (0.45 + R()); }
+  bolt.t += dt;
+  const t = bolt.t;
+  const f = t < 0.05 ? 1 : t < 0.11 ? 0.25 : t < 0.19 ? 0.85 : t < 0.25 ? 0.2 : 0.55 * Math.exp(-(t - 0.25) * 7);
+  flash = bolt.I * f;
+  const d = norm3(sub(bolt.mid, cam.eye)); flashDir[0] = d[0]; flashDir[1] = d[1]; flashDir[2] = d[2];
+}
+
+// ---------- Wake map ----------
+const prevMarks = { stern: [0, 0] as number[], port: [0, 0] as number[], stbd: [0, 0] as number[] };
+let wakeBlob = 0;
+const segU = new Float32Array(12), segP = new Float32Array(6);
+function wakePass(p: Program) {
+  G.bindFramebuffer(G.FRAMEBUFFER, wakeB.fb); G.viewport(0, 0, WAKE.res, WAKE.res);
+  G.activeTexture(G.TEXTURE0); G.bindTexture(G.TEXTURE_2D, wakeA.tex);
+  p.i('uSrc', 0);
+  G.bindVertexArray(quad.vao); G.drawArrays(G.TRIANGLE_STRIP, 0, 4);
+  [wakeA, wakeB] = [wakeB, wakeA];
+}
+function updateWake() {
+  const dx = Math.round(boat.x - WAKE.ox), dy = Math.round(boat.y - WAKE.oy);
+  if (Math.abs(dx) > 48 || Math.abs(dy) > 48) {
+    wakePass(pShift.use().v2('uShift', dx / WAKE.size, dy / WAKE.size));
+    WAKE.ox += dx; WAKE.oy += dy;
+  }
+  const uv = (p: number[]) => [(p[0] - WAKE.ox) / WAKE.size + 0.5, (p[1] - WAKE.oy) / WAKE.size + 0.5];
+  const st = boat.local(-7.2, 0, 0), po = boat.local(4.6, 2.3, 0), sb = boat.local(4.6, -2.3, 0);
+  const speed = Math.hypot(boat.vx, boat.vy);
+  const marks: [number[], V3, number, number][] = [
+    [prevMarks.stern, st, 1.8 + speed * 0.08, 0.012 * clamp(Math.abs(boat.rpm) * 0.8 + speed / 11, 0, 1.3)],
+    [prevMarks.port, po, 0.9, 0.012 * smoothstep(2.5, 10, speed)],
+    [prevMarks.stbd, sb, 0.9, 0.012 * smoothstep(2.5, 10, speed)],
   ];
-  // Look direction: lagged yaw, softened pitch, rolled with the hull and the bank.
-  const cp = qn('camp', -0.40) + boat.pitch * 0.45;
-  const cy = helmCam.yaw;
-  let fwd: [number, number, number] = norm([Math.cos(cy) * Math.cos(cp), Math.sin(cy) * Math.cos(cp), Math.sin(cp)]);
-  const roll = (boat.roll + boat.bank * 1.0) * 0.75;
-  let right = norm(cross(fwd, [0, 0, 1]));
-  let up = cross(right, fwd);
-  const rr = norm([right[0] * Math.cos(roll) + up[0] * Math.sin(roll), right[1] * Math.cos(roll) + up[1] * Math.sin(roll), right[2] * Math.cos(roll) + up[2] * Math.sin(roll)]);
-  right = rr; up = norm(cross(right, fwd));
-  void r;
-  const speed = Math.hypot(boat.vx, boat.vy) / TOP_SPEED;
-  const fov = (58 + 18 * Math.min(speed, 1.2)) * Math.PI / 180;
-  return { eye, fwd, right, up, fov };
+  marks.forEach(([prev, now, w, I], i) => {
+    const a = uv(prev), b = uv(now);
+    segU.set([a[0], a[1], b[0], b[1]], i * 4); segP.set([w / WAKE.size, I], i * 2);
+    prev[0] = now[0]; prev[1] = now[1];
+  });
+  const bow = uv(boat.local(6, 0, 0));
+  wakePass(pWake.use().v2('uTexel', 1 / WAKE.res, 1 / WAKE.res).v4a('uSeg', segU).v2a('uSegP', segP)
+    .v3('uBlob', [bow[0], bow[1], 5 / WAKE.size]).f('uBlobI', wakeBlob));
+  wakeBlob = 0;
 }
-function camMatrices(cam: Camera): Mat4 {
-  const tgt: [number, number, number] = [cam.eye[0] + cam.fwd[0], cam.eye[1] + cam.fwd[1], cam.eye[2] + cam.fwd[2]];
-  return multiply(perspective(cam.fov, aspect, 0.02, 60), lookAt(cam.eye, tgt, cam.up));
+function resetWakeMarks() {
+  const st = boat.local(-7.2, 0, 0), po = boat.local(4.6, 2.3, 0), sb = boat.local(4.6, -2.3, 0);
+  prevMarks.stern = [st[0], st[1]]; prevMarks.port = [po[0], po[1]]; prevMarks.stbd = [sb[0], sb[1]];
 }
-// Screen (0..1, y down) -> sim uv by intersecting the orbit camera ray with the z = 0 plane.
-function unproject(sx: number, sy: number): [number, number] | null {
-  const cam = orbitCamera();
-  const th = Math.tan(cam.fov / 2);
-  const nx = (sx * 2 - 1) * th * aspect, ny = (1 - sy * 2) * th;
-  const d = [cam.fwd[0] + nx * cam.right[0] + ny * cam.up[0], cam.fwd[1] + nx * cam.right[1] + ny * cam.up[1], cam.fwd[2] + nx * cam.right[2] + ny * cam.up[2]];
-  if (d[2] >= -1e-5) return null;
-  const t = -cam.eye[2] / d[2];
-  const px = cam.eye[0] + d[0] * t, py = cam.eye[1] + d[1] * t;
-  return [px / (2 * aspect) + 0.5, py / 2 + 0.5];
+resetWakeMarks();
+
+// ---------- Buoys ----------
+const buoySample = newSample(), buoyGx = newSample(), buoyGy = newSample();
+const buoyModels: Mat4[] = BUOYS.map(() => IDENT);
+const buoyTops: V3[] = BUOYS.map(() => [0, 0, 0]);
+function updateBuoys() {
+  BUOYS.forEach((b, i) => {
+    const z = sampleWater(b.x, b.y, buoySample).z;
+    const gx = (sampleWater(b.x + 1.5, b.y, buoyGx).z - z) / 1.5, gy = (sampleWater(b.x, b.y + 1.5, buoyGy).z - z) / 1.5;
+    const ax = boatAxes(b.phase, Math.atan(gx * 0.8), -Math.atan(gy * 0.8));
+    const p: V3 = [b.x, b.y, z - 0.2];
+    buoyModels[i] = fromAxes(ax.X, ax.Y, ax.Z, p);
+    buoyTops[i] = [p[0] + ax.Z[0] * 3.7, p[1] + ax.Z[1] * 3.7, p[2] + ax.Z[2] * 3.7];
+  });
 }
 
-// ---------- Pointer / keyboard input ----------
-interface Pointer { x: number; y: number; dx: number; dy: number; moved: boolean; sx: number; sy: number; orbit: boolean; age: number; zone: 'steer' | 'throttle' | null; sx0: number; sy0: number; }
-const pointers = new Map<number, Pointer>();
-let pinchDist = 0;
+// ---------- Glows ----------
+const MAXG = 64;
+const glowData = new Float32Array(MAXG * 60);
+let glowCount = 0;
+const CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, -1], [1, 1], [-1, 1]];
+function addGlow(p: V3, size: number, col: V3, a: number) {
+  if (a <= 0.002 || glowCount >= MAXG) return;
+  CORNERS.forEach((c, k) => glowData.set([p[0], p[1], p[2], c[0], c[1], size, col[0], col[1], col[2], a], glowCount * 60 + k * 10));
+  glowCount++;
+}
+const BUOY_LIGHT: V3[] = [[1, 0.25, 0.2], [0.3, 1, 0.45], [1, 0.8, 0.3]];
 
-function screenPos(e: PointerEvent): [number, number] {
-  const r = canvas.getBoundingClientRect();
-  return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
-}
-function toSim(sx: number, sy: number): [number, number] | null {
-  return view3D() ? unproject(sx, sy) : [sx, 1 - sy];
-}
-function updateDriveInput() {
-  let str = 0, thr = 0, hasS = false, hasT = false;
-  for (const p of pointers.values()) {
-    if (p.zone === 'steer') { str = Math.max(-1, Math.min(1, -(p.sx - p.sx0) / 0.18)); hasS = true; }
-    if (p.zone === 'throttle') { thr = Math.max(-0.5, Math.min(1, -(p.sy - p.sy0) / 0.22)); hasT = true; }
+// ---------- HUD ----------
+const compass = $<HTMLCanvasElement>('compass'), cctx = compass.getContext('2d')!;
+const minimap = $<HTMLCanvasElement>('minimap'), mctx = minimap.getContext('2d')!;
+const islandImg = (() => {
+  const res = SHORE.res, out = document.createElement('canvas');
+  out.width = res; out.height = res;
+  const ctx = out.getContext('2d')!, img = ctx.createImageData(res, res);
+  for (let j = 0; j < res; j++) for (let i = 0; i < res; i++) {
+    const h = shoreData[j * res + i] / 255 * 40 - 20, o = ((res - 1 - j) * res + i) * 4;
+    if (h > 0.3) img.data.set([118, 126, 112, 255], o);
+    else if (h > -8) img.data.set([60, 98, 104, Math.round(200 * (1 + h / 8))], o);
   }
-  const kStr = (keys.has('a') || keys.has('ArrowLeft') ? 1 : 0) - (keys.has('d') || keys.has('ArrowRight') ? 1 : 0);
-  const kThr = (keys.has('w') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('s') || keys.has('ArrowDown') ? 0.5 : 0);
-  input.str = hasS ? str : kStr;
-  input.thr = hasT ? thr : kThr;
-}
-canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-canvas.addEventListener('pointerdown', (e) => {
-  try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic events have no active pointer */ }
-  const [sx, sy] = screenPos(e);
-  const p = toSim(sx, sy) ?? [0, 0];
-  const orbit = view === '3d' && (e.button === 2 || e.shiftKey);
-  const zone = view === 'helm' ? (sx < 0.5 ? 'steer' : 'throttle') : null;
-  pointers.set(e.pointerId, { x: p[0], y: p[1], dx: 0, dy: 0, moved: false, sx, sy, orbit, age: 0, zone, sx0: sx, sy0: sy });
-  if (pointers.size === 2) {
-    const [a, b] = [...pointers.values()];
-    pinchDist = Math.hypot(a.sx - b.sx, a.sy - b.sy);
-  }
-  updateDriveInput();
-});
-canvas.addEventListener('pointermove', (e) => {
-  const p = pointers.get(e.pointerId);
-  if (!p) return;
-  const [sx, sy] = screenPos(e);
-  if (p.zone) { p.sx = sx; p.sy = sy; updateDriveInput(); return; }
-  const multiTouch = view === '3d' && pointers.size >= 2;
-  if (p.orbit || multiTouch) {
-    const scale = multiTouch ? 0.5 : 1;
-    orbitCam.yaw += (sx - p.sx) * 3.0 * scale;
-    orbitCam.pitch = Math.min(1.5, Math.max(0.15, orbitCam.pitch + (sy - p.sy) * 2.0 * scale));
-    p.sx = sx; p.sy = sy;
-    if (multiTouch) {
-      const [a, b] = [...pointers.values()];
-      const d = Math.hypot(a.sx - b.sx, a.sy - b.sy);
-      if (pinchDist > 0) orbitCam.dist = Math.min(8, Math.max(1.2, orbitCam.dist * (pinchDist / d)));
-      pinchDist = d;
-    }
-    return;
-  }
-  const s = toSim(sx, sy);
-  p.sx = sx; p.sy = sy;
-  if (!s) return;
-  p.dx += s[0] - p.x; p.dy += s[1] - p.y; p.x = s[0]; p.y = s[1]; p.moved = true;
-});
-const end = (e: PointerEvent) => { pointers.delete(e.pointerId); pinchDist = 0; updateDriveInput(); };
-canvas.addEventListener('pointerup', end);
-canvas.addEventListener('pointercancel', end);
-canvas.addEventListener('pointerleave', end);
-canvas.addEventListener('wheel', (e) => {
-  if (view !== '3d') return;
-  e.preventDefault();
-  orbitCam.dist = Math.min(8, Math.max(1.2, orbitCam.dist * Math.exp(e.deltaY * 0.001)));
-}, { passive: false });
-window.addEventListener('keydown', (e) => {
-  if (e.target instanceof HTMLInputElement) return;
-  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  if (['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) { keys.add(k); e.preventDefault(); updateDriveInput(); }
-  if (k === 'h' || k === 'H') setView(view === 'helm' ? '3d' : 'helm');
-});
-window.addEventListener('keyup', (e) => {
-  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  keys.delete(k); updateDriveInput();
-});
-window.addEventListener('blur', () => { keys.clear(); updateDriveInput(); });
+  ctx.putImageData(img, 0, 0);
+  return out;
+})();
+const trail: number[][] = [];
+let trailT = 0;
+const knotsEl = $('knots'), seaEl = $('sea'), leverFill = $('leverFill'), leverZero = $('leverZero'), needle = $('rudderNeedle'), toastEl = $('toast');
+let toastTimer = 0;
+function toast(msg: string, dur = 3.5) { toastEl.textContent = msg; toastEl.classList.add('show'); toastTimer = dur; }
+const bearing = (dx: number, dy: number) => ((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360;
+const SEA_STATES = ['Sheltered water', 'Moderate swell', 'Rough sea', 'Very rough', 'High seas'];
+let seaState = 0, seaCand = 0, seaCandT = 0;
 
-// ---------- Simulation step ----------
-function ballRadiusUv() { return 0.04 + (Number(splatSlider.value) / 100) * 0.14; }
-const BALL_SINK_FRAC = 0.55;
-
-// Apply the 3D ball push for one pointer this frame (pressing and/or moving).
-function ballPush(p: Pointer, dt: number) {
-  const R = ballRadiusUv();
-  const Rw = R * 2;
-  const hs = currentHeightScale();
-  const depth = (Rw * (1 - BALL_SINK_FRAC)) / hs;
-  const entering = Math.exp(-p.age / 5);
-  const speed = Math.hypot(p.dx, p.dy);
-  let ax = p.dx * aspect, ay = p.dy;
-  const m = Math.hypot(ax, ay);
-  if (m > 1e-6) { ax /= m; ay /= m; } else { ax = 0; ay = 0; }
-  const ridge = depth * 0.25 * entering * dt;
-  const move = Math.min(speed * 8, 0.12) * depth;
-  pBallPush.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', p.x, p.y).f('uRadius', R).f('uDepth', depth)
-    .f('uRidge', ridge).v2('uDir', ax, ay).f('uMove', move).f('uAspect', aspect).tex('uTarget', wave.read.attach(0));
-  blit(wave.write); wave.swap();
-  const press = 10 * entering * dt;
-  const mf = Math.min(speed, 0.04) * 300;
-  pBallVel.use().v2('uTexel', 1 / simW, 1 / simH).v2('uPoint', p.x, p.y).f('uRadius', R).f('uPress', press)
-    .v2('uMoveForce', ax / aspect * mf, ay * mf).f('uAspect', aspect).tex('uTarget', velocity.read.attach(0));
-  blit(velocity.write); velocity.swap();
+function drawCompass(hdg: number) {
+  const W = compass.width, Hh = compass.height;
+  if (!W) return;
+  const dpr = W / compass.clientWidth, ppd = W / 120;
+  cctx.clearRect(0, 0, W, Hh);
+  const g = cctx.createLinearGradient(0, 0, W, 0);
+  g.addColorStop(0, 'rgba(8,14,20,0)'); g.addColorStop(0.15, 'rgba(8,14,20,0.45)'); g.addColorStop(0.85, 'rgba(8,14,20,0.45)'); g.addColorStop(1, 'rgba(8,14,20,0)');
+  cctx.fillStyle = g; cctx.fillRect(0, 0, W, Hh);
+  cctx.textAlign = 'center'; cctx.textBaseline = 'top';
+  const names: Record<number, string> = { 0: 'N', 45: 'NE', 90: 'E', 135: 'SE', 180: 'S', 225: 'SW', 270: 'W', 315: 'NW' };
+  for (let d = Math.ceil((hdg - 60) / 5) * 5; d <= hdg + 60; d += 5) {
+    const x = W / 2 + (d - hdg) * ppd, dd = ((d % 360) + 360) % 360;
+    cctx.globalAlpha = Math.max(1 - Math.abs(d - hdg) / 62, 0);
+    cctx.fillStyle = '#e4ebf0';
+    const major = dd % 15 === 0;
+    cctx.fillRect(x - dpr * 0.5, Hh - (major ? 9 : 5) * dpr, dpr, (major ? 9 : 5) * dpr);
+    if (names[dd] !== undefined) { cctx.font = `600 ${12 * dpr}px system-ui`; cctx.fillText(names[dd], x, 3 * dpr); }
+    else if (major) { cctx.font = `${9 * dpr}px system-ui`; cctx.fillStyle = 'rgba(228,235,240,0.65)'; cctx.fillText(String(dd), x, 5 * dpr); }
+  }
+  cctx.globalAlpha = 1;
+  // Lighthouse bearing marker.
+  const lb = bearing(LIGHTHOUSE.x - boat.x, LIGHTHOUSE.y - boat.y);
+  let rel = ((lb - hdg + 540) % 360) - 180;
+  const edge = Math.abs(rel) > 58;
+  rel = clamp(rel, -58, 58);
+  const mx = W / 2 + rel * ppd;
+  cctx.fillStyle = '#e9b44c';
+  cctx.beginPath();
+  if (edge) { const s = Math.sign(rel); cctx.moveTo(mx + s * 6 * dpr, Hh / 2); cctx.lineTo(mx - s * 2 * dpr, Hh / 2 - 6 * dpr); cctx.lineTo(mx - s * 2 * dpr, Hh / 2 + 6 * dpr); }
+  else { cctx.moveTo(mx, Hh - 11 * dpr); cctx.lineTo(mx - 5 * dpr, Hh - 19 * dpr); cctx.lineTo(mx + 5 * dpr, Hh - 19 * dpr); }
+  cctx.fill();
+  cctx.fillStyle = '#e4ebf0';
+  cctx.fillRect(W / 2 - dpr, Hh - 14 * dpr, 2 * dpr, 14 * dpr);
 }
 
-function splat(x: number, y: number, dx: number, dy: number) {
-  const radius = (Number(splatSlider.value) / 100) * 0.01 + 0.0004;
-  const force = 1400;
-  const speed = Math.hypot(dx, dy);
-  pSplat.use().v2('uTexel', 1 / simW, 1 / simH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
-    .tex('uTarget', velocity.read.attach(0)).v3('uValue', dx * force, dy * force, 0);
-  blit(velocity.write); velocity.swap();
-  pSplat.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
-    .tex('uTarget', dye.read.attach(0)).v3('uValue', Math.min(speed * 40, 1.2), 0, 0);
-  blit(dye.write); dye.swap();
+function drawMinimap() {
+  const W = minimap.width;
+  if (!W) return;
+  const dpr = W / minimap.clientWidth, cx = W / 2, cy = W / 2, rad = W / 2 - 2 * dpr;
+  const scale = rad / 1300;
+  const mx = (x: number) => cx + (x - boat.x) * scale, my = (y: number) => cy - (y - boat.y) * scale;
+  mctx.clearRect(0, 0, W, W);
+  mctx.save();
+  mctx.beginPath(); mctx.arc(cx, cy, rad, 0, Math.PI * 2); mctx.clip();
+  const g = mctx.createRadialGradient(mx(IC.x), my(IC.y), 600 * scale, mx(IC.x), my(IC.y), 3000 * scale);
+  g.addColorStop(0, 'rgba(34,62,72,0.88)'); g.addColorStop(1, 'rgba(8,13,18,0.92)');
+  mctx.fillStyle = g; mctx.fillRect(0, 0, W, W);
+  mctx.setLineDash([4 * dpr, 4 * dpr]); mctx.strokeStyle = 'rgba(233,180,76,0.45)'; mctx.lineWidth = dpr;
+  mctx.beginPath(); mctx.arc(mx(IC.x), my(IC.y), 1500 * scale, 0, Math.PI * 2); mctx.stroke(); mctx.setLineDash([]);
+  const sz = SHORE.size * scale;
+  mctx.drawImage(islandImg, mx(IC.x + SHORE.min), my(IC.y + SHORE.min + SHORE.size), sz, sz);
+  mctx.fillStyle = '#9aa196';
+  for (const p of PILLARS) { mctx.beginPath(); mctx.arc(mx(p.x), my(p.y), Math.max(p.r * scale, 1.5 * dpr), 0, Math.PI * 2); mctx.fill(); }
+  BUOYS.forEach((b) => { const c = BUOY_COLS[b.kind]; mctx.fillStyle = `rgb(${c.map((v) => Math.min(255, Math.round(v * 320))).join(',')})`; mctx.fillRect(mx(b.x) - dpr, my(b.y) - dpr, 2 * dpr, 2 * dpr); });
+  const blink = Math.sin(time * 1.1) > 0.6 ? 1 : 0.55;
+  mctx.fillStyle = `rgba(255,214,120,${blink})`; mctx.beginPath(); mctx.arc(mx(LIGHTHOUSE.x), my(LIGHTHOUSE.y), 3 * dpr, 0, Math.PI * 2); mctx.fill();
+  mctx.lineWidth = 1.5 * dpr;
+  for (let i = 1; i < trail.length; i++) {
+    mctx.strokeStyle = `rgba(200,225,235,${(i / trail.length) * 0.6})`;
+    mctx.beginPath(); mctx.moveTo(mx(trail[i - 1][0]), my(trail[i - 1][1])); mctx.lineTo(mx(trail[i][0]), my(trail[i][1])); mctx.stroke();
+  }
+  mctx.restore();
+  mctx.strokeStyle = 'rgba(228,235,240,0.35)'; mctx.lineWidth = dpr;
+  mctx.beginPath(); mctx.arc(cx, cy, rad, 0, Math.PI * 2); mctx.stroke();
+  mctx.fillStyle = '#e4ebf0'; mctx.font = `600 ${10 * dpr}px system-ui`; mctx.textAlign = 'center'; mctx.fillText('N', cx, 13 * dpr);
+  mctx.save(); mctx.translate(cx, cy); mctx.rotate(-boat.psi);
+  mctx.fillStyle = '#e9b44c'; mctx.beginPath(); mctx.moveTo(8 * dpr, 0); mctx.lineTo(-5 * dpr, 4.5 * dpr); mctx.lineTo(-3 * dpr, 0); mctx.lineTo(-5 * dpr, -4.5 * dpr); mctx.fill();
+  mctx.restore();
 }
 
-function step(dt0: number) {
-  const tx = 1 / simW, ty = 1 / simH;
-  const sf = speedFactor();
-  const dt = dt0 * sf; // fluid time step
-  const [velDamp, waveDamp] = DAMP_LEVELS[dampLevel];
-
-  for (const p of pointers.values()) {
-    if (p.zone || p.orbit) continue;
-    if (view === '3d') {
-      const mm = Math.hypot(p.dx, p.dy), cap = 0.04;
-      if (mm > cap) { p.dx *= cap / mm; p.dy *= cap / mm; }
-      ballPush(p, dt0);
-      p.age += dt0;
-      p.dx = 0; p.dy = 0; p.moved = false;
-      continue;
-    }
-    if (p.moved && (p.dx !== 0 || p.dy !== 0)) {
-      const m = Math.hypot(p.dx, p.dy), cap = 0.04;
-      const k = m > cap ? cap / m : 1;
-      splat(p.x, p.y, p.dx * k, p.dy * k);
-    }
-    p.dx = 0; p.dy = 0; p.moved = false;
+let gatePrev = [boat.x, boat.y];
+function checkGates() {
+  for (let i = 0; i < PILLARS.length - 1; i++) {
+    const A = PILLARS[i], B = PILLARS[i + 1];
+    const ex = B.x - A.x, ey = B.y - A.y;
+    const s0 = ex * (gatePrev[1] - A.y) - ey * (gatePrev[0] - A.x), s1 = ex * (boat.y - A.y) - ey * (boat.x - A.x);
+    if (s0 * s1 >= 0) continue;
+    const t = ((boat.x - A.x) * ex + (boat.y - A.y) * ey) / (ex * ex + ey * ey);
+    if (t < 0 || t > 1) continue;
+    const islandSide = ex * (IC.y - A.y) - ey * (IC.x - A.x);
+    const outward = (s1 > 0) !== (islandSide > 0);
+    toast(i === ARCH.a ? (outward ? 'Through the arch' : 'Home through the arch') : outward ? 'Past the stacks' : 'Back inside the bay');
   }
-
-  // 1. Advect velocity (self-advection) with damping.
-  pAdvect.use().v2('uTexel', tx, ty).f('uDt', dt).f('uDissipation', velDamp)
-    .tex('uVelocity', velocity.read.attach(0)).tex('uSource', velocity.read.attach(0));
-  blit(velocity.write); velocity.swap();
-
-  // 2. Viscous diffusion.
-  const nu = viscosity();
-  if (nu > 0) {
-    const alpha = 1 / (nu * dt);
-    const rBeta = 1 / (4 + alpha);
-    pAdvect.use().v2('uTexel', tx, ty).f('uDt', 0).f('uDissipation', 1)
-      .tex('uVelocity', velocity.read.attach(0)).tex('uSource', velocity.read.attach(0));
-    blit(viscB);
-    pJacobi.use().v2('uTexel', tx, ty).f('uAlpha', alpha).f('uRBeta', rBeta).tex('uB', viscB.attach(1));
-    for (let i = 0; i < VISC_ITERS; i++) {
-      pJacobi.tex('uX', velocity.read.attach(0));
-      blit(velocity.write); velocity.swap();
-    }
-  }
-
-  // 3-7. Boundary, divergence, pressure solve, projection.
-  pBound.use().v2('uTexel', tx, ty).tex('uVelocity', velocity.read.attach(0));
-  blit(velocity.write); velocity.swap();
-  pDiv.use().v2('uTexel', tx, ty).tex('uVelocity', velocity.read.attach(0));
-  blit(divergence);
-  pJacobi.use().v2('uTexel', tx, ty).f('uAlpha', -1).f('uRBeta', 0.25).tex('uB', divergence.attach(1));
-  for (let i = 0; i < PRESSURE_ITERS; i++) {
-    pJacobi.tex('uX', pressure.read.attach(0));
-    blit(pressure.write); pressure.swap();
-  }
-  pGrad.use().v2('uTexel', tx, ty).tex('uPressure', pressure.read.attach(0)).tex('uVelocity', velocity.read.attach(1));
-  blit(velocity.write); velocity.swap();
-  pBound.use().v2('uTexel', tx, ty).tex('uVelocity', velocity.read.attach(0));
-  blit(velocity.write); velocity.swap();
-
-  // 8. Boat: physics on the CPU, state to the GPU, attitude back from the GPU.
-  boatPhysics(dt0);
-  if (view === 'helm') recenterIfNeeded();
-  uploadBoat();
-
-  if (!view3D()) {
-    pAdvect.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', dt * (dyeW / simW)).f('uDissipation', 0.985)
-      .tex('uVelocity', velocity.read.attach(0)).tex('uSource', dye.read.attach(1));
-    blit(dye.write); dye.swap();
-    readBoatInfo();
-    return;
-  }
-
-  // 9 (3D). Advect the height field with the flow.
-  pAdvect.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', dt * (dyeW / simW)).f('uDissipation', 1.0)
-    .tex('uVelocity', velocity.read.attach(0)).tex('uSource', wave.read.attach(1));
-  blit(wave.write); wave.swap();
-
-  // 10 (3D). Surface waves, sub-stepped.
-  const subs = Math.max(1, Math.round(2 * sf));
-  const wdt = dt0;
-  const c2 = Math.min(0.3, 0.4 / Math.max(wdt * wdt, 1e-3));
-  const wd = Math.pow(waveDamp * (1 - 0.01 * nu), 1 / subs);
-  const heightScale = currentHeightScale();
-  pWave.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', wdt).f('uC2', c2).f('uDamp', wd)
-    .f('uAspect', aspect).f('uBoatSize', showBoat ? BOAT_SCALE * 0.25 : 0.0001)
-    .f('uDraft', BOAT_SCALE * BOAT_DRAFT / heightScale)
-    .tex('uBoat', boatState.attach(1));
-  swellUniforms(pWave);
-  for (let i = 0; i < subs; i++) {
-    pWave.tex('uField', wave.read.attach(0));
-    blit(wave.write); wave.swap();
-  }
-
-  // 11 (3D). Spray particles.
-  pPartUpdate.use().f('uDt', dt0).f('uTime', (performance.now() % 100000) / 1000).f('uAspect', aspect)
-    .f('uHeightScale', heightScale).f('uBoatSize', BOAT_SCALE * 0.25).f('uSpawnRate', showBoat ? 1 : 0)
-    .v2('uSimTexel', tx, ty).v2('uShiftW', pendingShiftW.x, pendingShiftW.y)
-    .tex('uA', partRead.a.attach(0)).tex('uB', partRead.b.attach(1))
-    .tex('uField', wave.read.attach(2)).tex('uBoat', boatState.attach(3))
-    .tex('uVelocity', velocity.read.attach(4));
-  swellUniforms(pPartUpdate);
-  pendingShiftW = { x: 0, y: 0 };
-  G.bindVertexArray(quadVao);
-  G.bindFramebuffer(G.FRAMEBUFFER, partWrite.fb);
-  G.viewport(0, 0, PART_W, PART_H);
-  G.drawArrays(G.TRIANGLE_STRIP, 0, 4);
-  const t = partRead; partRead = partWrite; partWrite = t;
-
-  readBoatInfo();
+  gatePrev = [boat.x, boat.y];
 }
 
-// ---------- Rendering ----------
-function drawBoat(vp: Mat4, eye: [number, number, number], heightScale: number) {
-  if (!showBoat) return;
-  pBoat.use().m4('uVP', vp).v2('uTexel', 1 / dyeW, 1 / dyeH).f('uAspect', aspect).f('uHeightScale', heightScale)
-    .f('uScale', BOAT_SCALE).v3('uEye', eye[0], eye[1], eye[2]).f('uBank', boat.bank)
-    .tex('uState', boatState.attach(0)).tex('uHeight', (view3D() ? wave : dye).read.attach(1));
-  swellUniforms(pBoat);
-  G.bindVertexArray(boatVao);
-  G.drawArrays(G.TRIANGLES, 0, boatVertCount);
-  G.bindVertexArray(quadVao);
+function updateHud(dt: number) {
+  const sp = Math.hypot(boat.vx, boat.vy);
+  knotsEl.textContent = (sp * 1.944).toFixed(0);
+  const hs = sigWaveHeight(boat.x, boat.y);
+  const s = stormAt(boat.x, boat.y);
+  const cat = s < 0.06 ? 0 : s < 0.28 ? 1 : s < 0.52 ? 2 : s < 0.78 ? 3 : 4;
+  if (cat !== seaCand) { seaCand = cat; seaCandT = 0; } else seaCandT += dt;
+  if (seaCand !== seaState && seaCandT > 1.5) { seaState = seaCand; if (playing) toast(SEA_STATES[seaState]); }
+  seaEl.innerHTML = `${SEA_STATES[seaState]} · waves <b>${hs.toFixed(1)} m</b>`;
+  const zero = 0.5 / 1.5 * 100;
+  leverZero.style.bottom = `${zero}%`;
+  if (boat.lever >= 0) { leverFill.style.bottom = `${zero}%`; leverFill.style.height = `${boat.lever / 1.5 * 100}%`; }
+  else { leverFill.style.bottom = `${zero + boat.lever / 1.5 * 100}%`; leverFill.style.height = `${-boat.lever / 1.5 * 100}%`; }
+  needle.style.left = `${50 - boat.rudder * 45}%`;
+  drawCompass(((90 - boat.psi * 180 / Math.PI) % 360 + 360) % 360);
+  trailT += dt;
+  if (trailT > 0.5) { trailT = 0; trail.push([boat.x, boat.y]); if (trail.length > 160) trail.shift(); }
+  drawMinimap();
+  if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) toastEl.classList.remove('show'); }
 }
 
-function render2D(t: number) {
-  pDisplay.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uTime', t)
-    .tex('uDye', dye.read.attach(0)).tex('uPressure', pressure.read.attach(1)).tex('uVelocity', velocity.read.attach(2));
-  blit(null);
-  G.enable(G.DEPTH_TEST);
-  G.clear(G.DEPTH_BUFFER_BIT);
-  drawBoat(ortho(-aspect, aspect, -1, 1, -10, 10), [0, 0, 10], 0.0);
-  G.disable(G.DEPTH_TEST);
+// ---------- Resize ----------
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, isMobile ? 1.25 : 1.5);
+  const w = Math.floor(innerWidth * dpr), h = Math.floor(innerHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  const hd = Math.min(devicePixelRatio || 1, 2);
+  for (const c of [compass, minimap]) {
+    const cw = Math.round(c.clientWidth * hd), ch = Math.round(c.clientHeight * hd);
+    if (cw && (c.width !== cw || c.height !== ch)) { c.width = cw; c.height = ch; }
+  }
 }
 
-function drawSpray(vp: Mat4) {
-  pPart.use().m4('uVP', vp).f('uPointScale', canvas.height * 0.012).tex('uA', partRead.a.attach(0)).i('uTexW', PART_W);
-  G.enable(G.BLEND);
-  G.blendFunc(G.SRC_ALPHA, G.ONE_MINUS_SRC_ALPHA);
-  G.depthMask(false);
-  G.bindVertexArray(partVao);
-  G.drawArrays(G.POINTS, 0, PART_N);
-  G.bindVertexArray(quadVao);
-  G.depthMask(true);
-  G.disable(G.BLEND);
+// ---------- Render ----------
+function common(p: Program) {
+  return p.v3('uCamPos', cam.eye).v3('uSunDir', SUN_DIR).v3('uSunCol', atm.sun).v3('uAmbTop', atm.ambT).v3('uAmbBot', atm.ambB)
+    .v3('uFogCol', atm.fog).f('uFogDen', atm.fogDen).f('uFlash', flash).v3('uFlashDir', flashDir).f('uTime', time);
+}
+function drawSolid(mesh: { vao: WebGLVertexArrayObject; count: number }, model: Mat4, vp: Mat4, wet = 0) {
+  pSolid.m4('uVP', vp).m4('uModel', model).f('uWet', wet);
+  G.bindVertexArray(mesh.vao); G.drawArrays(G.TRIANGLES, 0, mesh.count);
 }
 
-function render3D(dt: number) {
-  const cam = view === 'helm' ? helmCamera(dt) : orbitCamera();
-  const vp = camMatrices(cam);
-  const heightScale = currentHeightScale();
+// Keep a usable horizontal field of view in portrait.
+function fitFov(vfov: number, aspect: number) {
+  const hmin = 78 * Math.PI / 180;
+  return Math.min(Math.max(vfov, 2 * Math.atan(Math.tan(hmin / 2) / aspect)), 105 * Math.PI / 180);
+}
+
+function render(boatModel: Mat4, boatInv: Mat4) {
+  const aspect = canvas.width / canvas.height;
+  cam.fov = fitFov(cam.fov, aspect);
+  const view = lookAt(cam.eye, [cam.eye[0] + cam.fwd[0], cam.eye[1] + cam.fwd[1], cam.eye[2] + cam.fwd[2]], cam.up);
+  const vp = multiply(perspective(cam.fov, aspect, cam.near, 9000), view);
   G.bindFramebuffer(G.FRAMEBUFFER, null);
   G.viewport(0, 0, canvas.width, canvas.height);
-  G.disable(G.DEPTH_TEST);
+  G.clearColor(0, 0, 0, 1); G.clear(G.COLOR_BUFFER_BIT | G.DEPTH_BUFFER_BIT);
+
   // Sky.
-  pSky.use().v3('uFwd', ...cam.fwd).v3('uRight', ...cam.right).v3('uUp', ...cam.up)
-    .f('uTanHalfFov', Math.tan(cam.fov / 2)).f('uAspect2', aspect);
-  blit(null);
-  G.enable(G.DEPTH_TEST);
-  G.clear(G.DEPTH_BUFFER_BIT);
+  G.disable(G.DEPTH_TEST); G.depthMask(false);
+  common(pSky.use()).v3('uFwd', cam.fwd).v3('uRight', cam.right).v3('uUp', cam.up).f('uTanHalf', Math.tan(cam.fov / 2)).f('uAspect', aspect)
+    .v3('uSkyTop', atm.sky).v3('uIsland', [IC.x, IC.y, IC.R]).v2('uWindDir', windVec[0], windVec[1]).f('uStorm', smoothstep(0.1, 0.8, atm.s));
+  G.bindVertexArray(quad.vao); G.drawArrays(G.TRIANGLE_STRIP, 0, 4);
+  G.enable(G.DEPTH_TEST); G.depthMask(true);
+
+  // Solids.
+  common(pSolid.use());
+  drawSolid(land, IDENT, vp, 1);
+  BUOYS.forEach((b, i) => drawSolid(buoyMeshes[b.kind], buoyModels[i], vp));
+  drawSolid(boatMesh, boatModel, vp);
+  const ct = Math.cos(0.6), stt = Math.sin(0.6), spn = boat.rudder * 2.4, cs = Math.cos(spn), ss = Math.sin(spn);
+  const local = new Float32Array([ct, 0, -stt, 0, 0, 1, 0, 0, stt, 0, ct, 0, WHEEL_POS[0], WHEEL_POS[1], WHEEL_POS[2], 1]);
+  const spin = new Float32Array([1, 0, 0, 0, 0, cs, ss, 0, 0, -ss, cs, 0, 0, 0, 0, 1]);
+  drawSolid(wheelMesh, multiply(boatModel, multiply(local, spin)), vp);
+
   // Ocean.
-  pMesh.use().m4('uVP', vp).f('uAspect', aspect).f('uHeightScale', heightScale)
-    .v2('uTexel', 1 / dyeW, 1 / dyeH).v3('uEye', ...cam.eye).v2('uBoatUv', showBoat ? boat.x : -10, boat.y)
-    .tex('uHeight', wave.read.attach(0)).tex('uVelocity', velocity.read.attach(1));
-  swellUniforms(pMesh);
-  G.bindVertexArray(meshVao);
-  G.drawElements(G.TRIANGLES, meshIndexCount, G.UNSIGNED_INT, 0);
-  G.bindVertexArray(quadVao);
-  drawBoat(vp, cam.eye, heightScale);
-  drawSpray(vp);
-  G.disable(G.DEPTH_TEST);
+  common(pOcean.use()).m4('uVP', vp).v2('uCenter', Math.round(cam.eye[0] / 4) * 4, Math.round(cam.eye[1] / 4) * 4)
+    .v4a('uWA', uWA).v4a('uWB', uWB).v3('uIsland', [IC.x, IC.y, IC.R]).i('uWake', 0).i('uShore', 1)
+    .v3('uWakeRect', [WAKE.ox, WAKE.oy, WAKE.size]).v3('uShoreRect', [IC.x + SHORE.min, IC.y + SHORE.min, SHORE.size])
+    .v3('uSkyTop', atm.sky).v2('uWind', windVec[0] * 0.15, windVec[1] * 0.15);
+  G.activeTexture(G.TEXTURE0); G.bindTexture(G.TEXTURE_2D, wakeA.tex);
+  G.activeTexture(G.TEXTURE1); G.bindTexture(G.TEXTURE_2D, shoreTex);
+  G.bindVertexArray(ocean.vao); G.drawElements(G.TRIANGLES, ocean.count, G.UNSIGNED_INT, 0);
+
+  // Translucent and additive passes.
+  G.enable(G.BLEND); G.depthMask(false);
+  G.blendFunc(G.SRC_ALPHA, G.ONE_MINUS_SRC_ALPHA);
+  common(pSpray.use()).m4('uVP', vp).f('uPx', canvas.height / Math.tan(cam.fov / 2));
+  G.bindVertexArray(sprayBuf.vao); G.bindBuffer(G.ARRAY_BUFFER, sprayBuf.buf); G.bufferData(G.ARRAY_BUFFER, sprayPos, G.DYNAMIC_DRAW);
+  G.drawArrays(G.POINTS, 0, MAXP);
+
+  const onBridge = camMode === 'bridge' && playing;
+  const rainCount = Math.floor((isMobile ? 2500 : 6000) * atm.rain);
+  if (rainCount > 0) {
+    common(pRain.use()).m4('uVP', vp).v3('uCamVel', onBridge ? [boat.vx, boat.vy, boat.vz] : [0, 0, 0])
+      .v3('uRainVel', [windVec[0] * 10 * atm.wind, windVec[1] * 10 * atm.wind, -11]).f('uBox', 44).m4('uBoatInv', boatInv)
+      .f('uMask', onBridge ? 1 : 0).f('uAmt', 0.4 + 0.6 * atm.rain);
+    G.bindVertexArray(rainVao); G.drawArrays(G.LINES, 0, rainCount * 2);
+  }
+
+  G.blendFunc(G.ONE, G.ONE);
+  const beamAng = time * 0.55;
+  const bm = fromAxes([Math.cos(beamAng), Math.sin(beamAng), 0], [-Math.sin(beamAng), Math.cos(beamAng), 0], [0, 0, 1], [LIGHTHOUSE.x, LIGHTHOUSE.y, LIGHTHOUSE.lamp]);
+  pBeam.use().m4('uVP', vp).m4('uModel', bm).v3('uCamPos', cam.eye).f('uFogDen', atm.fogDen).f('uI', 0.6 + 0.6 * (1 - atm.s));
+  G.bindVertexArray(beam.vao); G.drawArrays(G.TRIANGLES, 0, beam.count);
+
+  // Glows: lighthouse lamp (flares as the beam sweeps past), buoy lights, boat lights.
+  glowCount = 0;
+  const lamp: V3 = [LIGHTHOUSE.x, LIGHTHOUSE.y, LIGHTHOUSE.lamp];
+  const toCam = norm3([cam.eye[0] - lamp[0], cam.eye[1] - lamp[1], 0]);
+  const align = Math.abs(Math.cos(beamAng) * toCam[0] + Math.sin(beamAng) * toCam[1]);
+  const ld = Math.hypot(cam.eye[0] - lamp[0], cam.eye[1] - lamp[1]);
+  const glare = Math.pow(align, 80);
+  addGlow(lamp, 5 + ld * 0.004 + glare * (40 + ld * 0.05), [1, 0.85, 0.6], (1.2 + 5 * glare) * Math.exp(-ld * atm.fogDen * 0.45));
+  BUOYS.forEach((b, i) => {
+    if (((time + b.phase) % 3) >= 0.6) return;
+    const d = Math.hypot(cam.eye[0] - buoyTops[i][0], cam.eye[1] - buoyTops[i][1]);
+    addGlow(buoyTops[i], 1.2 + d * 0.006, BUOY_LIGHT[b.kind], 1.4 * Math.exp(-d * atm.fogDen * 0.5));
+  });
+  if (!onBridge) {
+    addGlow(boat.local(-0.03, 0, 6.4), 0.8, [1, 1, 0.95], 1.1);
+    addGlow(boat.local(0.3, 1.8, 2.4), 0.5, [1, 0.2, 0.2], 1.0);
+    addGlow(boat.local(0.3, -1.8, 2.4), 0.5, [0.2, 1, 0.3], 1.0);
+  }
+  if (glowCount) {
+    pGlow.use().m4('uVP', vp).v3('uCamRight', cam.right).v3('uCamUp', cam.up);
+    G.bindVertexArray(glowBuf.vao); G.bindBuffer(G.ARRAY_BUFFER, glowBuf.buf);
+    G.bufferData(G.ARRAY_BUFFER, glowData.subarray(0, glowCount * 60), G.DYNAMIC_DRAW);
+    G.drawArrays(G.TRIANGLES, 0, glowCount * 6);
+  }
+
+  // Lightning bolt.
+  if (bolt.t < 0.32 && bolt.pts.length) {
+    const verts: number[] = [];
+    bolt.pts.forEach((line, bi) => {
+      for (let k = 0; k < line.length - 1; k++) {
+        const p = line[k], q = line[k + 1];
+        const mid: V3 = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2, (p[2] + q[2]) / 2];
+        const w = (bi === 0 ? 9 : 5) + Math.hypot(mid[0] - cam.eye[0], mid[1] - cam.eye[1]) * 0.003;
+        const sd = norm3(cross(sub(q, p), sub(cam.eye, mid)));
+        const a0: V3 = [p[0] - sd[0] * w, p[1] - sd[1] * w, p[2] - sd[2] * w], a1: V3 = [p[0] + sd[0] * w, p[1] + sd[1] * w, p[2] + sd[2] * w];
+        const b0: V3 = [q[0] - sd[0] * w, q[1] - sd[1] * w, q[2] - sd[2] * w], b1: V3 = [q[0] + sd[0] * w, q[1] + sd[1] * w, q[2] + sd[2] * w];
+        verts.push(...a0, 0, ...a1, 1, ...b1, 1, ...a0, 0, ...b1, 1, ...b0, 0);
+      }
+    });
+    pBolt.use().m4('uVP', vp).f('uI', flash * 2.2);
+    G.bindVertexArray(boltBuf.vao); G.bindBuffer(G.ARRAY_BUFFER, boltBuf.buf);
+    G.bufferData(G.ARRAY_BUFFER, new Float32Array(verts), G.DYNAMIC_DRAW);
+    G.drawArrays(G.TRIANGLES, 0, verts.length / 4);
+  }
+  G.disable(G.BLEND); G.depthMask(true);
+  G.bindVertexArray(null);
 }
 
-function updateHud() {
-  if (view !== 'helm') return;
-  const sp = Math.hypot(boat.vx, boat.vy);
-  knotsEl.textContent = (sp * 2700).toFixed(0);
-  const deg = ((90 - boat.heading * 180 / Math.PI) % 360 + 360) % 360;
-  hdgEl.textContent = `HDG ${deg.toFixed(0).padStart(3, '0')}°`;
+// ---------- Game step ----------
+function handleEvents() {
+  for (const e of boat.events) {
+    if (e.type === 'slam') {
+      audio.slap(e.i);
+      cam.shake = Math.max(cam.shake, 0.08 * e.i);
+      wakeBlob = 0.6 * e.i;
+      const n = Math.round(30 + 80 * e.i);
+      for (let k = 0; k < n; k++) emitLocal([5.6 + R() * 1.4, (R() - 0.5) * 3.4, 1.4 + R() * 0.6], [-(1 + R() * 5 * e.i), (R() - 0.5) * (4 + 8 * e.i), 3 + R() * (5 + 9 * e.i)]);
+    } else if (e.type === 'green') {
+      for (let k = 0; k < 70 * e.i; k++) emitLocal([3 + R() * 3, (R() - 0.5) * 3, 1.8 + R()], [-(4 + R() * 5), (R() - 0.5) * 3, 2 + R() * 3]);
+      cam.shake = Math.max(cam.shake, 0.05);
+    } else {
+      audio.crunch(e.i);
+      cam.shake = Math.max(cam.shake, 0.25 * e.i);
+      toast('Rocks!', 1.5);
+    }
+  }
+  boat.events.length = 0;
 }
 
-let fpsN = 0, fpsT = performance.now();
+function step(dt: number) {
+  if (playing) updateControls(dt);
+  const n = Math.max(1, Math.ceil(dt / (1 / 60)));
+  for (let i = 0; i < n; i++) boat.step(dt / n, windVec[0] * 14 * atm.wind, windVec[1] * 14 * atm.wind);
+  handleEvents();
+  const speed = Math.hypot(boat.vx, boat.vy);
+  if (speed > 3.5 && boat.imm > -0.9) {
+    const k = speed > 8 ? 2 : 1;
+    for (let j = 0; j < k; j++) for (const sg of [1, -1]) emitLocal([5.2 + R(), sg * 1.7, 0.6], [-1 - R(), sg * (1.5 + R() * 2.5), 1.2 + R() * 2.2], 0.7);
+  }
+  if (playing) checkGates();
+}
+
+function simulate(dt: number) {
+  time += dt;
+  updatePhases(time);
+  step(dt);
+  updateAtmosphere(dt);
+  updateLightning(dt);
+  updateBuoys();
+  const ax = boatAxes(boat.psi, boat.th, boat.ph);
+  const pos: V3 = [boat.x, boat.y, boat.z];
+  const model = fromAxes(ax.X, ax.Y, ax.Z, pos), inv = rigidInverse(ax.X, ax.Y, ax.Z, pos);
+  updateSpray(dt, inv);
+  updateWake();
+  updateCamera(dt);
+  return { model, inv };
+}
+
+// ---------- Main loop ----------
 let last = performance.now();
 function frame(now: number) {
-  fpsN++;
-  if (now - fpsT > 500) { fpsEl.textContent = (fpsN * 1000 / (now - fpsT)).toFixed(0) + ' fps'; fpsN = 0; fpsT = now; }
-  const dt = Math.min((now - last) / 1000, 1 / 30);
+  const dt = Math.min((now - last) / 1000, 0.05);
   last = now;
   resize();
-  if (!velocity) { requestAnimationFrame(frame); return; }
-  if (!paused) { simTime += dt * speedFactor(); step(dt * 60); }
-  if (view3D()) render3D(dt * 60); else render2D(now / 1000);
-  updateHud();
-  audio.update(ctrl.throttle, Math.min(Math.hypot(boat.vx, boat.vy) / TOP_SPEED, 1), boat.slam, view === 'helm');
+  const { model, inv } = simulate(dt);
+  render(model, inv);
+  updateHud(dt);
+  audio.update({
+    speed: Math.min(Math.hypot(boat.vx, boat.vy) / 11, 1), rpm: boat.rpm, storm: 0.15 + 0.85 * atm.s, rain: atm.rain, wind: atm.wind,
+    heave: Math.abs(boat.vz), roll: Math.abs(boat.phv),
+  }, dt);
   requestAnimationFrame(frame);
 }
+
+$('go').addEventListener('click', () => {
+  playing = true;
+  document.body.classList.add('playing');
+  audio.start();
+  boat.lever = 0;
+  resetWakeMarks();
+  if (isTouch) { document.body.classList.add('hint'); setTimeout(() => document.body.classList.remove('hint'), 6000); }
+  setTimeout(() => toast('Sheltered water'), 1800);
+});
+$('camBtn').addEventListener('click', toggleCam);
+$('muteBtn').addEventListener('click', toggleMute);
+$('fsBtn').addEventListener('click', () => {
+  if (document.fullscreenElement) void document.exitFullscreen();
+  else void document.documentElement.requestFullscreen?.().catch(() => undefined);
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden) last = performance.now(); });
+
+updateAtmosphere(10);
 requestAnimationFrame(frame);
 
-// Dev hooks: advance N frames synchronously (works while rAF is throttled) and sample state.
-(window as unknown as { __advance: (n: number) => void }).__advance = (n: number) => {
-  for (let i = 0; i < n; i++) { simTime += speedFactor() / 60; step(1); if (view === 'helm') helmCamera(1); }
-  if (view3D()) render3D(1); else render2D(0);
+// Dev hooks: deterministic stepping while the tab is throttled, and state inspection.
+const dev = window as unknown as Record<string, unknown>;
+dev.__advance = (n: number, dt = 1 / 60) => {
+  let r = simulate(dt);
+  for (let i = 1; i < n; i++) r = simulate(dt);
+  render(r.model, r.inv); updateHud(0);
 };
-(window as unknown as { __dbg: () => unknown }).__dbg = () => ({ boat: { ...boat }, ctrl: { ...ctrl }, input: { ...input }, origin: { ...origin }, view });
-(window as unknown as { __cam: () => unknown }).__cam = () => { const c = view === 'helm' ? helmCamera(0) : orbitCamera(); return { ...c, vp: Array.from(camMatrices(c)).map((x) => +x.toFixed(3)) }; };
+dev.__game = {
+  boat, keys, cam, atm, start: () => $('go').click(), toggleCam,
+  teleport: (x: number, y: number, psi: number) => { boat.x = x; boat.y = y; boat.psi = psi; boat.vx = boat.vy = 0; resetWakeMarks(); gatePrev = [x, y]; },
+};
