@@ -15,7 +15,7 @@ const keelZ = (x: number) => {
   const t = clamp((x - STERN) / (BOW - STERN), 0, 1);
   return -4.2 * (t > 0.78 ? 1 - Math.pow((t - 0.78) / 0.22, 1.6) * 0.75 : 1) * (t < 0.05 ? 0.75 + 5 * t : 1);
 };
-const gunZ = (x: number) => 5.2 + 2.5 * smoothstep(-10.2, -11.4, x) + 1.5 * smoothstep(13, 14.2, x) + 0.8 * smoothstep(15, 18, x);
+export const gunZ = (x: number) => 5.2 + 2.5 * smoothstep(-10.2, -11.4, x) + 1.5 * smoothstep(13, 14.2, x) + 0.8 * smoothstep(15, 18, x);
 const sideDeck = (x: number) => (x < -11 ? QUARTER_DECK : x > 13.5 ? FORE_DECK : MAIN_DECK);
 
 // ---- Deck layout (walkable) ----
@@ -55,6 +55,17 @@ export function moveOnDeck(x: number, y: number, dx: number, dy: number): [numbe
   };
   return tryMove(x + dx, y + dy) ?? tryMove(x + dx, y) ?? tryMove(x, y + dy) ?? [x, y];
 }
+
+// Climbing: a walker goes up the aft face of a mast from the deck to near its top.
+export const climbX = (i: number) => MASTS[i].x - MASTS[i].r - 0.4;
+export const climbTop = (i: number) => MASTS[i].top - 1.6;
+// Rail point on the main deck for a gangplank, just inside the bulwark.
+export const railPoint = (x: number, side: number): [number, number] => [clamp(x, -8.5, 10.5), side * (halfBeam(clamp(x, -8.5, 10.5)) - 0.75)];
+export function hullContains(l: V3, pad = 0): boolean {
+  if (l[0] < STERN - pad || l[0] > BOW + pad) return false;
+  return Math.abs(l[1]) < halfBeam(l[0]) + pad && l[2] > -4.5 - pad && l[2] < gunZ(l[0]) + 1.2 + pad;
+}
+export const HULL_CIRCLES = [-14, -7, 0, 7, 14].map((x) => ({ x, r: halfBeam(x) + 0.4 }));
 
 // ---- Meshes ----
 const WOOD_DARK: V3 = [0.22, 0.14, 0.08], OCHRE: V3 = [0.48, 0.34, 0.13], WALE: V3 = [0.06, 0.05, 0.04];
@@ -253,6 +264,15 @@ export class Ship {
     return [this.x + X[0] * lx + Y[0] * ly + Z[0] * lz, this.y + X[1] * lx + Y[1] * ly + Z[1] * lz, this.z + X[2] * lx + Y[2] * ly + Z[2] * lz];
   }
   impulse(ix: number, iy: number, roll: number) { this.vx += ix; this.vy += iy; this.phv += roll; }
+  // Pull toward a world point when a rope of length len is stretched (harpoon or gangplank lashing).
+  pullToward(px: number, py: number, fromX: number, fromY: number, len: number, k: number, dt: number) {
+    const dx = px - fromX, dy = py - fromY, d = Math.hypot(dx, dy);
+    if (d <= len || d < 1e-3) return;
+    const nx = dx / d, ny = dy / d, ex = d - len;
+    this.vx += nx * ex * k * dt; this.vy += ny * ex * k * dt;
+    const away = -(this.vx * nx + this.vy * ny);
+    if (away > 0) { this.vx += nx * away * Math.min(1, 3 * dt); this.vy += ny * away * Math.min(1, 3 * dt); }
+  }
 
   step(dt: number, windX: number, windY: number) {
     const c = Math.cos(this.psi), s = Math.sin(this.psi);
@@ -288,10 +308,10 @@ export class Ship {
     this.psi += this.r * dt;
     this.x += this.vx * dt; this.y += this.vy * dt;
 
-    this.vz += ((zT - this.z) * 3.2 - 2.4 * this.vz) * dt; this.z += this.vz * dt;
-    this.thv += ((thT - this.th) * 2.8 - 2.0 * this.thv) * dt; this.th = clamp(this.th + this.thv * dt, -0.45, 0.45);
+    this.vz += ((zT + 0.4 - this.z) * 4.6 - 3.0 * this.vz) * dt; this.z += this.vz * dt;
+    this.thv += ((thT - this.th) * 4.0 - 2.6 * this.thv) * dt; this.th = clamp(this.th + this.thv * dt, -0.6, 0.6);
     const heel = clamp(this.r * u * 0.25, -0.12, 0.12) + this.sailSet * 0.07 * Math.sin(windAng);
-    this.phv += ((phT + heel - this.ph) * 2.0 - 0.9 * this.phv) * dt; this.ph = clamp(this.ph + this.phv * dt, -0.55, 0.55);
+    this.phv += ((phT + heel - this.ph) * 3.0 - 1.3 * this.phv) * dt; this.ph = clamp(this.ph + this.phv * dt, -0.6, 0.6);
 
     const bowZ = this.z + 16 * Math.sin(this.th), bowVz = this.vz + 16 * this.thv * Math.cos(this.th);
     this.imm = b.z - bowZ;

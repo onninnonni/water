@@ -90,9 +90,23 @@
     .go:hover { background: rgba(233, 180, 76, 0.3); }
     .go.alt { border-color: rgba(255,255,255,0.35); background: rgba(8,14,20,0.5); }
     #start .keys { font-size: 13px; color: var(--dim); line-height: 1.9; max-width: 620px; }
-    #joinbox { display: none; }
-    body.joining #joinbox { display: flex; }
-    body.joining #hostbox, body.joining #spawnrow { display: none; }
+    #crews { width: min(520px, 92vw); display: flex; flex-direction: column; gap: 6px; text-align: left; max-height: 34vh; overflow-y: auto; }
+    #crews .lbl { text-align: center; margin-bottom: 2px; }
+    #crews .crew { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px;
+      background: rgba(8,14,20,0.55); border: 1px solid rgba(255,255,255,0.14); border-radius: 12px; }
+    #crews .crew.invited { border-color: var(--amber); }
+    #crews .role { color: var(--dim); font-size: 12px; }
+    .go.small { padding: 8px 14px; font-size: 12px; letter-spacing: 0.12em; white-space: nowrap; }
+    #boss { position: absolute; top: calc(52px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); width: min(420px, 70vw);
+      display: none; text-align: center; text-shadow: 0 1px 8px rgba(0,0,0,0.9); }
+    #boss .name { font-size: 12px; letter-spacing: 0.4em; text-transform: uppercase; color: var(--red); padding-left: 0.4em; }
+    #bossbar { height: 7px; border-radius: 4px; background: rgba(255,255,255,0.14); margin-top: 4px; overflow: hidden; }
+    #bossfill { height: 100%; width: 100%; background: var(--red); transition: width 0.3s; }
+    #hpbar { width: 140px; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.14); margin: 5px 0 0 auto; overflow: hidden; }
+    #hpfill { height: 100%; width: 100%; background: #d9d2c4; transition: width 0.2s; }
+    #hurt { position: fixed; inset: 0; pointer-events: none; opacity: 0;
+      background: radial-gradient(ellipse at center, rgba(150,0,0,0) 40%, rgba(150,0,0,0.75) 100%); }
+    #reelT, #cutT { display: none; }
     #status { min-height: 1.4em; color: var(--amber); font-size: 13px; }
     .touchonly { display: none; }
     body.touch .touchonly { display: block; }
@@ -113,6 +127,7 @@
 <body>
   <canvas id="c"></canvas>
   <div id="vignette"></div>
+  <div id="hurt"></div>
 
   <div id="hud">
     <canvas id="compass"></canvas>
@@ -126,6 +141,7 @@
         <div class="lbl">knots</div>
         <div id="sea"></div>
         <div id="hullbar"><div id="hullfill"></div></div>
+        <div id="hpbar" title="Health"><div id="hpfill"></div></div>
         <div id="kills"></div>
       </div>
       <div id="controls">
@@ -138,11 +154,14 @@
       <button id="muteBtn" title="Sound on/off (M)">Mute</button>
       <button id="fsBtn" title="Fullscreen">⛶</button>
     </div>
+    <div id="boss"><div class="name">The Leviathan</div><div id="bossbar"><div id="bossfill"></div></div></div>
     <div id="prompt"></div>
     <div id="toast"></div>
     <div id="touchui">
       <div id="stick"><div id="knob"></div></div>
       <div id="tbtns">
+        <button id="cutT" class="tbtn">Cut loose</button>
+        <button id="reelT" class="tbtn">Reel</button>
         <button id="fireT" class="tbtn">Fire</button>
         <button id="actT" class="tbtn">Use</button>
         <button id="waveT" class="tbtn">Wave</button>
@@ -152,26 +171,20 @@
 
   <div id="start">
     <h1>SEVEN SEAS</h1>
-    <p>A pirate ship, a crew of two, and serpents in the storm beyond the stacks.</p>
+    <p>One sea, many ships. Join a crew or raise your own sails, then hunt serpents, fight other ships and face the Leviathan in the storm.</p>
     <div class="row"><input id="name" maxlength="18" placeholder="Your pirate name" /></div>
+    <div id="crews"></div>
     <div class="row seg" id="spawnrow">
       <button id="spShelter" class="on">Sheltered bay</button>
       <button id="spStorm">Heart of the storm</button>
     </div>
-    <div class="row" id="hostbox">
-      <button class="go" id="soloBtn">Sail solo</button>
-      <button class="go alt" id="hostBtn">Sail with a mate</button>
-    </div>
-    <div class="row" id="joinbox">
-      <button class="go" id="joinBtn">Join the crew</button>
-      <button class="go alt" id="leaveJoin">Sail my own ship</button>
-    </div>
+    <div class="row"><button class="go" id="soloBtn">Sail my own ship</button></div>
     <div id="status"></div>
     <div class="keys desktoponly">
-      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> walk · mouse to look · <kbd>E</kbd> take the wheel or the harpoon · click or <kbd>Space</kbd> fire a cannon<br />
-      At the wheel: <kbd>W</kbd>/<kbd>S</kbd> set sail, <kbd>A</kbd>/<kbd>D</kbd> steer · <kbd>C</kbd> camera · <kbd>Q</kbd> wave · <kbd>M</kbd> sound
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> walk · mouse to look · <kbd>E</kbd> use wheel, harpoon, mast, gangplank · click fire a cannon or swing your cutlass<br />
+      Harpoon: hold <kbd>R</kbd> or right mouse to reel in, click to rip it out · At the wheel: <kbd>W</kbd>/<kbd>S</kbd> sails, <kbd>A</kbd>/<kbd>D</kbd> steer, <kbd>G</kbd> cut a beaten ship loose · <kbd>C</kbd> camera · <kbd>M</kbd> sound
     </div>
-    <div class="keys touchonly">Left thumb: move or steer · Right thumb: look · Buttons for using the wheel, harpoon and cannons</div>
+    <div class="keys touchonly">Left thumb: move or steer · Right thumb: look · Buttons for the wheel, harpoon, cannons, masts and your cutlass</div>
   </div>
   <div id="wreck"><div style="font-size:22px">The sea took her</div><div style="font-size:12px;color:var(--dim)">Back to the bay…</div></div>
   <div id="err"></div>

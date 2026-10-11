@@ -1,4 +1,4 @@
-// Seven Seas crew relay: a dependency-free WebSocket relay. Each room holds up to 4 players;
+// Seven Seas relay: a dependency-free WebSocket relay. Each room (a shared world) holds up to 32 players;
 // the first to join is host. Messages from one member are forwarded to the others unchanged.
 // Control messages from the relay: {t:'hello', role, id, peers}, {t:'join', id}, {t:'leave', id}, {t:'promote'}.
 'use strict';
@@ -7,7 +7,7 @@ const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT) || 8798;
 const PREFIX = '/onni/seas/ws/';
-const MAX_ROOM = 4, MAX_ROOMS = 300, MAX_MSG = 64 * 1024, MAX_RATE = 120; // messages per second
+const MAX_ROOM = 32, MAX_ROOMS = 300, MAX_MSG = 64 * 1024, MAX_RATE = 150; // messages per second
 const rooms = new Map(); // code -> Set<Client>
 let nextId = 1;
 

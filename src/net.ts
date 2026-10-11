@@ -34,6 +34,7 @@ export class Net {
         if (m.t === 'join') { this.peers.add(m.id as number); this.onChange(); }
         if (m.t === 'leave') { this.peers.delete(m.id as number); this.onChange(); }
         if (m.t === 'promote') { this.role = 'host'; this.onChange(); }
+        if (m.to !== undefined && m.to !== this.id) return;
         this.onMsg(m);
       };
       ws.onerror = () => { if (!settled) { settled = true; reject(new Error('Could not reach the crew server')); } };
@@ -41,5 +42,7 @@ export class Net {
     });
   }
   send(m: NetMsg) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify({ ...m, from: this.id })); }
+  // Directed message: everyone receives it, only the addressee acts on it.
+  to(id: number, m: NetMsg) { this.send({ ...m, to: id }); }
   get online() { return this.ws !== null && this.ws.readyState === 1; }
 }

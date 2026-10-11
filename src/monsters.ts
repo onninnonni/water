@@ -1,16 +1,18 @@
-// Sea serpents: host-simulated, interpolated on guests. Each serpent is a head followed by
-// body segments laid along the trail of the head, arching in and out of the water.
+// Sea serpents and the Leviathan: simulated by the world host, smoothed on other clients. Each is a
+// head followed by body segments laid along the head's trail, arching in and out of the water.
 import { MeshBuilder, V3 } from './mesh';
 import { sampleWater, newSample } from './waves';
 import { clamp } from './world';
 
 export const SEGS = 14, SEG_GAP = 2.6;
-export const segRadius = (i: number) => (i === 0 ? 2.3 : 2.0 * (1 - (i / SEGS) * 0.72));
+export const BOSS_POS = { x: 1900, y: -3300 };
+export const segRadius = (i: number, scale = 1) => (i === 0 ? 2.3 : 2.0 * (1 - (i / SEGS) * 0.72)) * scale;
 export enum MS { Approach, Circle, Lunge, Retreat, Dying }
 
 export interface Monster {
-  id: number; x: number; y: number; hd: number; sp: number; phase: number; hp: number; st: MS; t: number;
+  id: number; x: number; y: number; hd: number; sp: number; phase: number; hp: number; maxHp: number; st: MS; t: number;
   rear: number; dying: number; hurt: number; trail: number[]; segs: V3[]; orbit: number; dir: number;
+  boss: boolean; scale: number; target: number; held: number;
 }
 
 export function buildSegmentMesh(): number[] {
@@ -35,11 +37,10 @@ export function buildHeadMesh(): number[] {
 
 const tmp = newSample();
 export function layoutSegments(m: Monster, time: number) {
-  const segs: V3[] = [];
-  // Walk the trail (newest first) to place segments every SEG_GAP metres.
+  const segs: V3[] = [], gap = SEG_GAP * m.scale;
   let ax = m.x, ay = m.y, acc = 0, ti = 0;
   for (let i = 0; i < SEGS; i++) {
-    const want = i * SEG_GAP;
+    const want = i * gap;
     while (acc < want && ti < m.trail.length) {
       const bx = m.trail[ti], by = m.trail[ti + 1], d = Math.hypot(bx - ax, by - ay);
       if (acc + d >= want) { const f = (want - acc) / Math.max(d, 1e-6); ax += (bx - ax) * f; ay += (by - ay) * f; acc = want; break; }
@@ -47,78 +48,129 @@ export function layoutSegments(m: Monster, time: number) {
     }
     if (acc < want) { ax -= Math.cos(m.hd) * (want - acc); ay -= Math.sin(m.hd) * (want - acc); acc = want; }
     const w = sampleWater(ax, ay, tmp).z;
-    const lift = m.rear * 7 * Math.max(0, 1 - i / 4);
-    const und = 2.2 * Math.sin(m.phase - i * 0.55) * (i === 0 ? 0.3 : 1);
-    segs.push([ax, ay, w - 0.5 + und + lift + (i === 0 ? 1.0 : 0) - m.dying * 9 + 0.15 * Math.sin(time * 3 + i)]);
+    const s = m.scale;
+    const lift = m.rear * 7 * s * Math.max(0, 1 - i / 4);
+    const und = 2.2 * Math.sqrt(s) * Math.sin(m.phase - i * 0.55) * (i === 0 ? 0.3 : 1);
+    segs.push([ax, ay, w - 0.5 * s + und + lift + (i === 0 ? 1.0 * s : 0) - m.dying * 9 * s + 0.15 * Math.sin(time * 3 + i)]);
   }
   m.segs = segs;
 }
 
 export function pushTrail(m: Monster) {
   const lx = m.trail[0] ?? m.x - Math.cos(m.hd), ly = m.trail[1] ?? m.y - Math.sin(m.hd);
-  if (Math.hypot(m.x - lx, m.y - ly) > 1.0) {
+  if (Math.hypot(m.x - lx, m.y - ly) > 1.0 * m.scale) {
     m.trail.unshift(m.x, m.y);
-    if (m.trail.length > (SEGS * SEG_GAP + 6) * 2) m.trail.length = Math.floor((SEGS * SEG_GAP + 6) * 2);
+    const max = Math.floor((SEGS * SEG_GAP * m.scale + 6) / m.scale) * 2 + 4;
+    if (m.trail.length > max) m.trail.length = max;
   }
 }
 
-export interface ShipRef { x: number; y: number; psi: number; vx: number; vy: number; }
+export interface ShipRef { id: number; x: number; y: number; psi: number; vx: number; vy: number; }
+export interface MonsterEvents { ram: (m: Monster, shipId: number, side: number) => void; bossSpawn: (m: Monster) => void; }
+
+function make(id: number, x: number, y: number, hd: number, boss: boolean): Monster {
+  return {
+    id, x, y, hd, sp: boss ? 12 : 9, phase: 0, hp: boss ? 40 : 4, maxHp: boss ? 40 : 4, st: MS.Approach, t: 0, rear: 0, dying: 0, hurt: 0,
+    trail: [], segs: [], orbit: boss ? 110 + Math.random() * 30 : 45 + Math.random() * 30, dir: Math.random() < 0.5 ? 1 : -1,
+    boss, scale: boss ? 3.2 : 1, target: 0, held: 0,
+  };
+}
+
 export class MonsterSystem {
   list: Monster[] = [];
+  bossCooldown = 0;
   private nextId = 1; private spawnT = 8;
 
-  update(dt: number, ship: ShipRef, storm: number, time: number, onRam: (m: Monster, side: number) => void) {
-    const max = storm < 0.12 ? 0 : 1 + Math.floor(storm * 2.6);
+  update(dt: number, ships: ShipRef[], stormAt: (x: number, y: number) => number, time: number, ev: MonsterEvents) {
+    this.bossCooldown = Math.max(0, this.bossCooldown - dt);
+    // Regular serpents: spawn near ships out in the storm.
     this.spawnT -= dt;
-    if (this.list.filter((m) => m.st !== MS.Dying).length < max && this.spawnT <= 0) {
-      const a = Math.random() * Math.PI * 2, d = 260 + Math.random() * 80;
-      const x = ship.x + Math.cos(a) * d, y = ship.y + Math.sin(a) * d;
-      this.list.push({ id: this.nextId++, x, y, hd: a + Math.PI, sp: 9, phase: 0, hp: 4, st: MS.Approach, t: 0, rear: 0, dying: 0, hurt: 0, trail: [], segs: [], orbit: 45 + Math.random() * 30, dir: Math.random() < 0.5 ? 1 : -1 });
-      this.spawnT = 10 + Math.random() * 12;
+    if (this.spawnT <= 0 && ships.length) {
+      this.spawnT = 8 + Math.random() * 10;
+      const sh = ships[Math.floor(Math.random() * ships.length)];
+      const storm = stormAt(sh.x, sh.y);
+      const near = this.list.filter((m) => !m.boss && m.st !== MS.Dying && Math.hypot(m.x - sh.x, m.y - sh.y) < 500).length;
+      if (storm >= 0.12 && near < 1 + Math.floor(storm * 2.6)) {
+        const a = Math.random() * Math.PI * 2, d = 260 + Math.random() * 80;
+        this.list.push(make(this.nextId++, sh.x + Math.cos(a) * d, sh.y + Math.sin(a) * d, a + Math.PI, false));
+      }
     }
-    const c = Math.cos(ship.psi), s = Math.sin(ship.psi);
+    // The Leviathan guards the heart of the storm.
+    if (!this.list.some((m) => m.boss) && this.bossCooldown <= 0) {
+      const sh = ships.find((s) => Math.hypot(s.x - BOSS_POS.x, s.y - BOSS_POS.y) < 900);
+      if (sh) {
+        const a = Math.random() * Math.PI * 2;
+        const b = make(this.nextId++, sh.x + Math.cos(a) * 380, sh.y + Math.sin(a) * 380, a + Math.PI, true);
+        this.list.push(b); ev.bossSpawn(b);
+      }
+    }
     for (const m of this.list) {
       m.t += dt; m.hurt = Math.max(0, m.hurt - dt * 2);
-      const dx = m.x - ship.x, dy = m.y - ship.y, dist = Math.hypot(dx, dy);
-      let tgt = m.hd, speed = 8;
-      if (m.st === MS.Dying) { m.dying = Math.min(1, m.dying + dt / 3); speed = 2; }
-      else if (storm < 0.08 && m.st !== MS.Retreat) { m.st = MS.Retreat; m.t = 0; }
-      if (m.st === MS.Approach) {
-        tgt = Math.atan2(-dy, -dx); speed = 10;
-        if (dist < m.orbit + 15) { m.st = MS.Circle; m.t = 0; }
-      } else if (m.st === MS.Circle) {
+      let tgt = ships[0];
+      let best = Infinity;
+      for (const s of ships) { const d = Math.hypot(m.x - s.x, m.y - s.y); if (d < best) { best = d; tgt = s; } }
+      if (!tgt) { m.st = MS.Retreat; }
+      const dx = tgt ? m.x - tgt.x : 0, dy = tgt ? m.y - tgt.y : 0, dist = tgt ? Math.hypot(dx, dy) : 1e9;
+      m.target = tgt?.id ?? 0;
+      const storm = tgt ? stormAt(tgt.x, tgt.y) : 0;
+      let head = m.hd, speed = 8;
+      const S = m.boss ? 1.5 : 1;
+      if (m.st === MS.Dying) { m.dying = Math.min(1, m.dying + dt / (m.boss ? 5 : 3)); speed = 2; }
+      else if (!m.boss && storm < 0.08 && m.st !== MS.Retreat) { m.st = MS.Retreat; m.t = 0; }
+      if (m.st === MS.Approach && tgt) {
+        head = Math.atan2(-dy, -dx); speed = 10 * S;
+        if (dist < m.orbit + 15 * m.scale) { m.st = MS.Circle; m.t = 0; }
+      } else if (m.st === MS.Circle && tgt) {
         const a = Math.atan2(dy, dx) + m.dir * 0.35;
-        tgt = Math.atan2(ship.y + Math.sin(a) * m.orbit - m.y, ship.x + Math.cos(a) * m.orbit - m.x); speed = 8.5;
-        if (m.t > 7 + (m.id % 5) * 1.5) { m.st = MS.Lunge; m.t = 0; }
-      } else if (m.st === MS.Lunge) {
-        const lead = 2.0;
-        tgt = Math.atan2(ship.y + ship.vy * lead - m.y, ship.x + ship.vx * lead - m.x); speed = 15;
+        head = Math.atan2(tgt.y + Math.sin(a) * m.orbit - m.y, tgt.x + Math.cos(a) * m.orbit - m.x); speed = 8.5 * S;
+        if (m.t > (m.boss ? 9 : 7) + (m.id % 5) * 1.5) { m.st = MS.Lunge; m.t = 0; }
+      } else if (m.st === MS.Lunge && tgt) {
+        const c = Math.cos(tgt.psi), s = Math.sin(tgt.psi);
+        head = Math.atan2(tgt.y + tgt.vy * 2 - m.y, tgt.x + tgt.vx * 2 - m.x); speed = 15 * S;
         const lx = dx * c + dy * s, ly = -dx * s + dy * c;
-        if (Math.abs(lx) < 19 && Math.abs(ly) < 7) { onRam(m, Math.sign(ly) || 1); m.st = MS.Retreat; m.t = 0; }
+        if (Math.abs(lx) < 19 + 2 * m.scale && Math.abs(ly) < 6 + 2 * m.scale) { ev.ram(m, tgt.id, Math.sign(ly) || 1); m.st = MS.Retreat; m.t = 0; }
         if (m.t > 12) { m.st = MS.Circle; m.t = 0; }
       } else if (m.st === MS.Retreat) {
-        tgt = Math.atan2(dy, dx); speed = 11;
-        if (m.t > 5 && storm >= 0.08) { m.st = MS.Circle; m.t = 0; }
+        head = tgt ? Math.atan2(dy, dx) : m.hd; speed = 11 * S;
+        if (m.t > (m.boss ? 4 : 5) && (storm >= 0.08 || m.boss)) { m.st = MS.Circle; m.t = 0; }
       }
-      const turn = Math.atan2(Math.sin(tgt - m.hd), Math.cos(tgt - m.hd));
-      m.hd += clamp(turn, -0.9 * dt, 0.9 * dt);
+      // A harpoon rope slows the beast.
+      if (m.held > 0) { speed *= 0.45; m.held = Math.max(0, m.held - dt); }
+      const turn = Math.atan2(Math.sin(head - m.hd), Math.cos(head - m.hd));
+      m.hd += clamp(turn, -(m.boss ? 0.6 : 0.9) * dt, (m.boss ? 0.6 : 0.9) * dt);
       m.sp += (speed - m.sp) * (1 - Math.exp(-dt));
       m.x += Math.cos(m.hd) * m.sp * dt; m.y += Math.sin(m.hd) * m.sp * dt;
-      m.phase += dt * (1.6 + m.sp * 0.12);
-      const wantRear = m.st === MS.Lunge && dist < 70 ? 1 : m.st === MS.Circle ? 0.25 + 0.2 * Math.sin(m.t * 0.7) : 0;
+      m.phase += dt * (1.6 + m.sp * 0.12) / Math.sqrt(m.scale);
+      const wantRear = m.st === MS.Lunge && dist < 70 * m.scale ? 1 : m.st === MS.Circle ? 0.25 + 0.2 * Math.sin(m.t * 0.7) : 0;
       m.rear += (wantRear - m.rear) * (1 - Math.exp(-dt * 1.5));
       pushTrail(m);
       layoutSegments(m, time);
     }
-    this.list = this.list.filter((m) => !(m.dying >= 1 || (m.st === MS.Retreat && storm < 0.08 && Math.hypot(m.x - ship.x, m.y - ship.y) > 400)));
+    this.list = this.list.filter((m) => {
+      if (m.dying >= 1) { if (m.boss) this.bossCooldown = 180; return false; }
+      const far = !ships.some((s) => Math.hypot(m.x - s.x, m.y - s.y) < (m.boss ? 1600 : 450));
+      if (far && (m.st === MS.Retreat || m.boss)) { if (m.boss) this.bossCooldown = 20; return false; }
+      return true;
+    });
   }
 
-  // Returns the monster hit by a point, if any.
+  // Hold a monster on a rope from a ship point: drag it back toward the ship when stretched.
+  constrain(id: number, px: number, py: number, len: number, dt: number) {
+    const m = this.list.find((x) => x.id === id);
+    if (!m) return;
+    m.held = 0.5;
+    const dx = m.x - px, dy = m.y - py, d = Math.hypot(dx, dy);
+    if (d > len && d > 1e-3) {
+      const k = Math.min(1, dt * (m.boss ? 1.2 : 4));
+      m.x -= dx / d * (d - len) * k; m.y -= dy / d * (d - len) * k;
+    }
+  }
+
   hitTest(p: V3, pad: number): Monster | null {
     for (const m of this.list) {
       if (m.st === MS.Dying) continue;
       for (let i = 0; i < m.segs.length; i++) {
-        const q = m.segs[i], r = segRadius(i) + pad;
+        const q = m.segs[i], r = segRadius(i, m.scale) + pad;
         if ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2 < r * r) return m;
       }
     }
@@ -127,16 +179,22 @@ export class MonsterSystem {
   damage(m: Monster, dmg: number): boolean {
     m.hp -= dmg; m.hurt = 1;
     if (m.hp <= 0 && m.st !== MS.Dying) { m.st = MS.Dying; m.t = 0; return true; }
-    if (m.st === MS.Lunge || m.st === MS.Circle) { m.st = MS.Retreat; m.t = 0; }
+    if (!m.boss && (m.st === MS.Lunge || m.st === MS.Circle)) { m.st = MS.Retreat; m.t = 0; }
     return false;
   }
-  pack(): number[][] { return this.list.map((m) => [m.id, +m.x.toFixed(2), +m.y.toFixed(2), +m.hd.toFixed(3), +m.phase.toFixed(3), m.hp, m.st, +m.rear.toFixed(3), +m.dying.toFixed(3), +m.hurt.toFixed(2)]); }
-  // Guest side: apply a snapshot, keeping local trails.
-  apply(rows: number[][], time: number) {
+  pack(): number[][] {
+    return this.list.map((m) => [m.id, +m.x.toFixed(2), +m.y.toFixed(2), +m.hd.toFixed(3), +m.phase.toFixed(3), m.hp, m.st, +m.rear.toFixed(3), +m.dying.toFixed(3), +m.hurt.toFixed(2), m.boss ? 1 : 0, m.maxHp]);
+  }
+  // Other clients: ease toward the world host's snapshot, keeping local trails.
+  apply(rows: number[][], dt: number, time: number) {
     const keep = new Map(this.list.map((m) => [m.id, m]));
+    const k = 1 - Math.exp(-dt * 10);
     this.list = rows.map((r) => {
-      const m = keep.get(r[0]) ?? { id: r[0], x: r[1], y: r[2], hd: r[3], sp: 0, phase: 0, hp: 4, st: MS.Approach, t: 0, rear: 0, dying: 0, hurt: 0, trail: [], segs: [], orbit: 60, dir: 1 };
-      [m.x, m.y, m.hd, m.phase, m.hp, m.st, m.rear, m.dying, m.hurt] = r.slice(1) as [number, number, number, number, number, MS, number, number, number];
+      let m = keep.get(r[0]);
+      if (!m) { m = make(r[0], r[1], r[2], r[3], !!r[10]); }
+      m.x += (r[1] - m.x) * k; m.y += (r[2] - m.y) * k;
+      m.hd += Math.atan2(Math.sin(r[3] - m.hd), Math.cos(r[3] - m.hd)) * k;
+      m.phase = r[4]; m.hp = r[5]; m.st = r[6] as MS; m.rear += (r[7] - m.rear) * k; m.dying = r[8]; m.hurt = r[9]; m.maxHp = r[11] ?? m.maxHp;
       pushTrail(m); layoutSegments(m, time);
       return m;
     });

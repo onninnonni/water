@@ -32,6 +32,9 @@ export class SeaAudio {
   private nextPing = 0; private nextMoan = 0; private nextCreak = 0; private nextKnock = 0; private nextGroan = 0;
   private windWalk = 0.5;
   private storm = 0;
+  private boss = 0; private bossTarget = 0;
+  private nextBeat = 0; private beat = 0; private nextChoir = 0; private nextBrass = 0;
+  private reelG: GainNode | null = null; private reelF: BiquadFilterNode | null = null;
   muted = false;
 
   get started() { return this.ctx !== null; }
@@ -268,14 +271,126 @@ export class SeaAudio {
     s.start(t, Math.random() * 2); s.stop(t + dur + 0.1);
   }
 
+  // ---- Boss battle ----
+  setBoss(level: number) { this.bossTarget = level; }
+  private drum(t: number, f: number, g: number, noise: number) {
+    const ctx = this.ctx!;
+    const o = ctx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(f * 2.2, t); o.frequency.exponentialRampToValueAtTime(f, t + 0.12);
+    const og = ctx.createGain(); og.gain.setValueAtTime(0, t); og.gain.linearRampToValueAtTime(g, t + 0.005); og.gain.exponentialRampToValueAtTime(0.0003, t + 0.7);
+    o.connect(og); og.connect(this.master); const r = ctx.createGain(); r.gain.value = 0.35; og.connect(r); r.connect(this.revIn);
+    o.start(t); o.stop(t + 0.75);
+    if (noise > 0) {
+      const sN = ctx.createBufferSource(); sN.buffer = this.brown;
+      const fl = ctx.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = 900;
+      const ng = ctx.createGain(); ng.gain.setValueAtTime(0, t); ng.gain.linearRampToValueAtTime(noise, t + 0.004); ng.gain.exponentialRampToValueAtTime(0.0003, t + 0.25);
+      sN.connect(fl); fl.connect(ng); ng.connect(this.master); sN.start(t, Math.random() * 2, 0.3);
+    }
+  }
+  // A huge male-choir "YO-HOOO": formant sweep from O to OO over very low detuned voices.
+  private choir(t: number, notes: number[], dur: number, g: number) {
+    const ctx = this.ctx!;
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(0, t); out.gain.linearRampToValueAtTime(g, t + 0.25); out.gain.setValueAtTime(g, t + dur * 0.35);
+    out.gain.linearRampToValueAtTime(g * 1.15, t + dur * 0.5); out.gain.linearRampToValueAtTime(0, t + dur);
+    const f1 = ctx.createBiquadFilter(); f1.type = 'bandpass'; f1.Q.value = 4;
+    f1.frequency.setValueAtTime(520, t); f1.frequency.linearRampToValueAtTime(560, t + dur * 0.3); f1.frequency.linearRampToValueAtTime(330, t + dur * 0.55);
+    const f2 = ctx.createBiquadFilter(); f2.type = 'bandpass'; f2.Q.value = 6;
+    f2.frequency.setValueAtTime(900, t); f2.frequency.linearRampToValueAtTime(720, t + dur * 0.55);
+    const f2g = ctx.createGain(); f2g.gain.value = 0.5;
+    f1.connect(out); f2.connect(f2g); f2g.connect(out);
+    out.connect(this.revIn); const dry = ctx.createGain(); dry.gain.value = 0.6; out.connect(dry); dry.connect(this.musicBus);
+    for (const nn of notes) for (const det of [-11, -3, 4, 12]) {
+      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.detune.value = det;
+      const f = NOTE(nn);
+      o.frequency.setValueAtTime(f * 0.97, t); o.frequency.linearRampToValueAtTime(f, t + 0.2);
+      o.frequency.setValueAtTime(f, t + dur * 0.4); o.frequency.linearRampToValueAtTime(f * 1.0595, t + dur * 0.5);
+      const vib = ctx.createOscillator(); vib.frequency.value = 5 + Math.random(); const vg = ctx.createGain(); vg.gain.value = f * 0.008;
+      vib.connect(vg); vg.connect(o.frequency);
+      o.connect(f1); o.connect(f2); o.start(t); vib.start(t); o.stop(t + dur + 0.05); vib.stop(t + dur + 0.05);
+    }
+  }
+  private brass(t: number, notes: number[], dur: number, g: number) {
+    const ctx = this.ctx!;
+    const fl = ctx.createBiquadFilter(); fl.type = 'lowpass'; fl.Q.value = 1.5;
+    fl.frequency.setValueAtTime(200, t); fl.frequency.linearRampToValueAtTime(1400, t + dur * 0.4); fl.frequency.linearRampToValueAtTime(300, t + dur);
+    const gg = ctx.createGain(); gg.gain.setValueAtTime(0, t); gg.gain.linearRampToValueAtTime(g, t + dur * 0.3); gg.gain.linearRampToValueAtTime(0, t + dur);
+    fl.connect(gg); gg.connect(this.musicBus); const r = ctx.createGain(); r.gain.value = 0.6; gg.connect(r); r.connect(this.revIn);
+    for (const nn of notes) for (const det of [-6, 6]) {
+      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = NOTE(nn); o.detune.value = det;
+      o.connect(fl); o.start(t); o.stop(t + dur + 0.05);
+    }
+  }
+  private bossMusic(t: number) {
+    const lvl = this.boss;
+    // War drums at ~92 bpm: BOOM . . boom BOOM . boom .
+    const step = 60 / 92 / 2;
+    while (this.nextBeat < t + 0.2) {
+      const b = this.beat++ % 16, at = this.nextBeat;
+      const pat = [1, 0, 0, 0.5, 1, 0, 0.5, 0, 1, 0, 0, 0.5, 1, 0.4, 0.7, 0.9];
+      if (pat[b] > 0) this.drum(at, b % 4 === 0 ? 42 : 55, 0.9 * pat[b] * lvl, b % 8 === 4 ? 0.5 * lvl : 0.15 * lvl);
+      this.nextBeat += step;
+    }
+    if (t > this.nextChoir) {
+      const prog = [[26, 33, 38], [22, 29, 34], [24, 31, 36], [21, 28, 33]];
+      this.choir(t, prog[Math.floor(t / 7) % 4], 6.5, 0.16 * lvl);
+      this.nextChoir = t + 6.6;
+    }
+    if (t > this.nextBrass) { this.brass(t + 0.1, [[38, 45, 50], [34, 41, 46], [36, 43, 48]][Math.floor(Math.random() * 3)], 3.2, 0.09 * lvl); this.nextBrass = t + 8 + Math.random() * 6; }
+  }
+
+  // ---- Combat sounds ----
+  whoosh(dist: number) {
+    if (!this.ctx) return;
+    const f = this.burst(this.white, 'bandpass', 900, 1.5, 0.25 * vol(dist, 6), 0.06, 0.18, 0, 0.05);
+    f.frequency.exponentialRampToValueAtTime(2600, this.ctx.currentTime + 0.18);
+  }
+  clash(dist: number) {
+    if (!this.ctx) return;
+    const v = vol(dist, 8);
+    for (const f of [1870, 2630, 3410]) this.tone('triangle', f, f * 0.98, 0.12 * v, 0.6, 0, 0.3);
+    this.burst(this.white, 'highpass', 3000, 0.7, 0.3 * v, 0.002, 0.15);
+  }
+  cut(dist: number) {
+    if (!this.ctx) return;
+    const v = vol(dist, 8);
+    this.burst(this.brown, 'lowpass', 400, 1, 0.7 * v, 0.004, 0.25);
+    this.burst(this.white, 'bandpass', 1500, 2, 0.2 * v, 0.004, 0.12);
+  }
+  rip(dist: number) {
+    if (!this.ctx) return;
+    const v = vol(dist, 60);
+    const f = this.burst(this.white, 'bandpass', 600, 3, 0.6 * v, 0.01, 0.6, 0, 0.4);
+    f.frequency.exponentialRampToValueAtTime(140, this.ctx.currentTime + 0.6);
+    this.burst(this.brown, 'lowpass', 180, 1, 0.8 * v, 0.005, 0.5);
+  }
+  // Ratcheting winch while reeling the harpoon line in.
+  reel(on: boolean) {
+    if (!this.ctx) return;
+    if (!this.reelG) {
+      const ctx = this.ctx;
+      const s = ctx.createBufferSource(); s.buffer = this.white; s.loop = true;
+      this.reelF = ctx.createBiquadFilter(); this.reelF.type = 'bandpass'; this.reelF.frequency.value = 1400; this.reelF.Q.value = 4;
+      const am = ctx.createOscillator(); am.type = 'square'; am.frequency.value = 14;
+      const amG = ctx.createGain(); amG.gain.value = 0;
+      this.reelG = ctx.createGain(); this.reelG.gain.value = 0;
+      am.connect(amG.gain); amG.gain.value = 0.5;
+      s.connect(this.reelF); this.reelF.connect(amG); amG.connect(this.reelG); this.reelG.connect(this.master);
+      s.start(); am.start();
+    }
+    this.reelG.gain.setTargetAtTime(on ? 0.22 : 0, this.ctx.currentTime, 0.05);
+  }
+
   update(a: AudioState, dt: number) {
     const ctx = this.ctx;
     if (!ctx) return;
     this.storm = a.storm;
     const t = ctx.currentTime, k = 0.25;
-    if (t > this.nextChord) { this.chord(); this.nextChord = t + 11; }
+    this.boss += (this.bossTarget - this.boss) * Math.min(1, dt * 0.6);
+    if (this.boss > 0.05) { if (this.nextBeat < t) this.nextBeat = t + 0.05; this.bossMusic(t); }
+    if (t > this.nextChord && this.boss < 0.5) { this.chord(); this.nextChord = t + 11; }
     if (t > this.nextPing) { this.ping(); this.nextPing = t + 18 + Math.random() * 25; }
-    if (t > this.nextMoan) { this.moan(); this.nextMoan = t + (a.storm > 0.5 ? 7 + Math.random() * 7 : a.storm > 0.2 ? 14 + Math.random() * 12 : 28 + Math.random() * 25); }
+    if (t > this.nextMoan && this.boss < 0.5) { this.moan(); this.nextMoan = t + (a.storm > 0.5 ? 7 + Math.random() * 7 : a.storm > 0.2 ? 14 + Math.random() * 12 : 28 + Math.random() * 25); }
     // Irregular water knocks: more often with speed, heave and storm.
     const activity = 0.25 + a.speed * 0.8 + Math.min(a.heave, 3) * 0.35 + a.storm * 0.8;
     if (t > this.nextKnock) { this.knock(Math.min(0.35 + activity * 0.3, 1)); this.nextKnock = t + (0.3 + Math.random() * 2.2) / activity; }

@@ -1,22 +1,31 @@
 # Seven Seas
 
-A two-player pirate game in TypeScript and raw WebGL2. Crew a 40 m ship with three masts, six
-cannons and a bow harpoon. Sail out of a sheltered bay, through a gate of sea stacks and under a
-rock arch, into a storm where the swell reaches 20 m and sea serpents hunt.
+A multiplayer pirate game in TypeScript and raw WebGL2. Every player sails the same sea: crew a
+40 m ship with three masts, six cannons and a bow harpoon, or join someone else's. Sail out of a
+sheltered bay, through a gate of sea stacks and under a rock arch, into a storm where the swell
+reaches 20 m, sea serpents hunt and the Leviathan waits.
 
 Live: https://onnin.no (also https://pikos.org/onni/water/) · The original 2D fluid simulator: https://pikos.org/juha/water/
 
 ## Play
 
-- **Start:** choose a name and spawn in the sheltered bay or the heart of the storm. *Sail solo*, or
-  *Sail with a mate* to get an invite link; your mate opens it and joins your ship.
+- **Start:** choose a name. The lobby lists every ship at sea with its crew; *Join crew* puts you on
+  board, or *Sail my own ship* in the sheltered bay or the heart of the storm. Invite links
+  (`?ship=ID`) highlight a ship in the list.
 - **On deck:** `WASD` walk, mouse to look (click to capture it), `Shift` run, `C` first/third person,
-  `Q` wave. Stand at a cannon and click or press `Space` to fire it.
-- **The wheel:** walk to it on the quarterdeck and press `E`. `W`/`S` set or furl sail, `A`/`D` steer,
-  `C` switches between your own view and an overview of the ship. Only one player holds the wheel;
-  with nobody at it the ship drifts with the sea.
-- **The harpoon:** press `E` at the bow ballista, aim with the mouse, click to fire.
-- **Touch:** left thumb moves or steers, right thumb looks, buttons for the wheel, harpoon and cannons.
+  `Q` wave. Stand at a cannon and click to fire it; anywhere else a click swings your cutlass.
+- **The wheel:** `E` on the quarterdeck. `W`/`S` set or furl sail, `A`/`D` steer, `C` overview.
+- **Masts:** `E` at the foot of a mast, `W`/`S` to climb to the top, `E` to slide down.
+- **The harpoon:** `E` at the bow, aim with the mouse, click to fire. It bites serpents, the
+  Leviathan and other ships and ties them to you. Hold `R` or right mouse to reel in; click again to
+  rip it out, which does more damage the longer it held.
+- **Ship against ship:** cannons and harpoons hit other ships. With another ship alongside, `E` at
+  the main-deck rail lays a gangplank that lashes the hulls together; `E` at its end to cross. The
+  crews fight with cutlasses; the fallen stay down until it is settled. When the other crew is all
+  down, whoever holds your wheel can press `G` to cut her loose.
+- **The Leviathan:** a giant serpent that rises in the biggest seas, far out in the storm (see the
+  red ring on the map), with its own war-drum and deep-choir music.
+- **Touch:** left thumb moves or steers, right thumb looks, buttons for everything else.
 
 ## How it works
 
@@ -26,8 +35,10 @@ Live: https://onnin.no (also https://pikos.org/onni/water/) · The original 2D f
   drift; slides down wave faces; sails drive best with the wind behind; slams, green water, rocks.
 - **Serpents:** host-simulated heads with bodies laid along their trail, arching through the swell;
   they circle, rear and ram. Cannonballs skip off the water and the guns time the roll.
-- **Crew:** the first player is host and runs the simulation; others send inputs and avatar state.
-  Messages go through a small WebSocket relay on pikos.org (`/onni/seas/ws/<room>`).
+- **Shared world:** everyone joins one relay room (up to 32 players). Each ship is simulated by its
+  owner, who broadcasts snapshots; the first player in the world runs the serpents and the clock.
+  Ownership passes to a crew member if the owner leaves. Water is masked inside every hull so big
+  waves never wash through the deck. Relay: a small WebSocket server on pikos.org.
 - **Sound:** procedural Web Audio: dark pads, deep horn-choir moans in the storm, irregular hull
   knocks and timber groans, wind, rain, cannons, serpent roars and distance-delayed thunder.
 

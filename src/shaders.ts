@@ -140,12 +140,23 @@ uniform sampler2D uShore;
 uniform vec3 uShoreRect; // min x, min y, size
 uniform vec3 uSkyTop;
 uniform vec2 uWind;
+uniform mat4 uShipInv[6];
+uniform int uShipN;
+float halfBeamG(float x){
+  float t = clamp((x + 18.0) / 36.0, 0.0, 1.0);
+  return t < 0.45 ? 5.0*(0.82 + 0.18*sin(1.5708*t/0.45)) : 5.0*pow(max(cos((t - 0.45)/0.55*1.5708), 0.0), 0.7);
+}
 vec3 skyReflect(vec3 r){
   vec3 c = mix(horizonCol(r), uSkyTop, pow(max(r.z, 0.0), 0.55));
   float sd = max(dot(r, uSunDir), 0.0);
   return c + uSunCol*(0.3*pow(sd, 8.0)) + vec3(0.6,0.65,0.85)*uFlash*0.6;
 }
 void main(){
+  for (int i = 0; i < 6; i++) {
+    if (i >= uShipN) break;
+    vec3 l = (uShipInv[i]*vec4(vPos, 1.0)).xyz;
+    if (l.x > -18.2 && l.x < 18.2 && abs(l.y) < halfBeamG(l.x)*0.97 - 0.05 && l.z < 11.0) discard;
+  }
   vec3 n = normalize(vN);
   vec3 toCam = uCamPos - vPos; float dist = length(toCam); vec3 V = toCam / dist;
   // Wind ripples and chop, stronger in the storm.
@@ -350,8 +361,8 @@ in vec2 vUv;
 out vec4 frag;
 uniform sampler2D uSrc;
 uniform vec2 uTexel;
-uniform vec4 uSeg[3];   // a.xy, b.xy in texture uv
-uniform vec2 uSegP[3];  // width (uv), intensity
+uniform vec4 uSeg[12];  // a.xy, b.xy in texture uv
+uniform vec2 uSegP[12]; // width (uv), intensity
 uniform vec3 uBlob;     // centre uv, radius uv
 uniform float uBlobI;
 float segDist(vec2 p, vec2 a, vec2 b){ vec2 pa = p - a, ba = b - a; float h = clamp(dot(pa, ba)/max(dot(ba, ba), 1e-9), 0.0, 1.0); return length(pa - ba*h); }
@@ -360,7 +371,7 @@ void main(){
   float nb = texture(uSrc, vUv + vec2(uTexel.x, 0)).r + texture(uSrc, vUv - vec2(uTexel.x, 0)).r
            + texture(uSrc, vUv + vec2(0, uTexel.y)).r + texture(uSrc, vUv - vec2(0, uTexel.y)).r;
   float v = mix(c, nb*0.25, 0.12)*0.99 - 0.0015;
-  for (int i = 0; i < 3; i++){ float d = segDist(vUv, uSeg[i].xy, uSeg[i].zw); v += uSegP[i].y*exp(-d*d/(uSegP[i].x*uSegP[i].x)); }
+  for (int i = 0; i < 12; i++){ if (uSegP[i].y <= 0.0) continue; float d = segDist(vUv, uSeg[i].xy, uSeg[i].zw); v += uSegP[i].y*exp(-d*d/(uSegP[i].x*uSegP[i].x)); }
   float db = length(vUv - uBlob.xy); v += uBlobI*exp(-db*db/(uBlob.z*uBlob.z));
   frag = vec4(clamp(v, 0.0, 1.0), 0.0, 0.0, 1.0);
 }`;
