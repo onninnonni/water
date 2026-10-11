@@ -520,3 +520,76 @@ void main() {
   vec3 col = vCol * (0.35 + 0.65 * diff) + spec;
   frag = vec4(col, 1.0);
 }`;
+
+// Shovel: an elongated blade perpendicular to the drag direction. uMode 0 writes a height
+// dipole (ridge ahead, trough behind) into the wave field; uMode 1 writes a plain bump (2D dye).
+export const SHOVEL = HEADER + `
+uniform sampler2D uTarget;
+uniform vec2 uPoint;
+uniform vec2 uDir;       // unit drag direction, aspect-corrected
+uniform float uWidth;    // blade half-width across the drag (uv-y units)
+uniform float uThick;    // blade thickness along the drag
+uniform float uAmount;
+uniform float uAspect;
+uniform int uMode;
+void main() {
+  vec2 d = vUv - uPoint; d.x *= uAspect;
+  float along = dot(d, uDir);
+  float across = dot(d, vec2(-uDir.y, uDir.x));
+  float w = exp(-across * across / (uWidth * uWidth)) * exp(-along * along / (uThick * uThick));
+  vec4 t = texture(uTarget, vUv);
+  if (uMode == 0) {
+    float dip = along / uThick * 1.65;   // dipole: + ahead of the blade, - behind
+    t.x += uAmount * w * dip;
+    t.y += uAmount * w * dip * 0.35;     // give the ridge upward momentum too
+  } else {
+    t.x += uAmount * w;
+  }
+  frag = t;
+}`;
+
+// Shovel push on the fluid velocity: the whole blade pushes water along the drag.
+export const SHOVEL_VEL = HEADER + `
+uniform sampler2D uTarget;
+uniform vec2 uPoint;
+uniform vec2 uDir;
+uniform float uWidth;
+uniform float uThick;
+uniform vec2 uForce;
+uniform float uAspect;
+void main() {
+  vec2 d = vUv - uPoint; d.x *= uAspect;
+  float along = dot(d, uDir);
+  float across = dot(d, vec2(-uDir.y, uDir.x));
+  float w = exp(-across * across / (uWidth * uWidth)) * exp(-along * along / (uThick * uThick * 2.0));
+  vec4 t = texture(uTarget, vUv);
+  t.xy += uForce * w;
+  frag = t;
+}`;
+
+// Shovel blade mesh, placed at the pointer on the water surface, facing the drag direction.
+export const VERT_TOOL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec3 aPos;
+in vec3 aCol;
+uniform sampler2D uHeight;
+uniform mat4 uVP;
+uniform vec2 uPoint;     // uv
+uniform vec2 uDir;       // unit, world xy
+uniform float uAspect;
+uniform float uHeightScale;
+uniform float uScale;
+${SWELL_GLSL}
+out vec3 vCol;
+out vec3 vWorld;
+void main() {
+  vec2 wp = worldXY(uPoint, uAspect);
+  float h = (texture(uHeight, uPoint).x + swellH(wp)) * uHeightScale;
+  vec3 fwd = vec3(uDir, 0.0);
+  vec3 rgt = vec3(-uDir.y, uDir.x, 0.0);
+  vec3 p = vec3(wp, h) + (aPos.x * fwd + aPos.y * rgt + vec3(0.0, 0.0, aPos.z)) * uScale;
+  vCol = aCol;
+  vWorld = p;
+  gl_Position = uVP * vec4(p, 1.0);
+}`;
