@@ -564,22 +564,79 @@ void main() {
   frag = vec4(col, 1.0);
 }`;
 
-// Push (3D): a round brush that shoves water along the drag: ridge ahead, trough behind,
-// with upward momentum on the ridge so it launches a travelling wave.
-export const PUSH_WAVE = HEADER + `
+// Push (3D): a ball pressed into the sea. Under the ball the surface is forced down to its
+// underside; the displaced water is thrown up as a ring ridge around it (strongest when the
+// ball first enters or moves) and as a bow ridge ahead of its motion.
+export const BALL_PUSH = HEADER + `
 uniform sampler2D uTarget;
-uniform vec2 uPoint;
-uniform vec2 uDir;       // unit drag direction, aspect-corrected
-uniform float uRadius;   // brush radius (uv-y units)
-uniform float uAmount;
+uniform vec2 uPoint;     // ball centre (uv)
+uniform float uRadius;   // ball radius at the waterline (uv-y units)
+uniform float uDepth;    // how deep the underside sits below the mean level (height units)
+uniform float uRidge;    // ring ridge amplitude this frame
+uniform vec2 uDir;       // unit motion direction (aspect-corrected), zero if still
+uniform float uMove;     // bow ridge amplitude this frame
 uniform float uAspect;
 void main() {
   vec2 d = vUv - uPoint; d.x *= uAspect;
-  float along = dot(d, uDir);
-  float w = exp(-dot(d, d) / (uRadius * uRadius));
-  float dip = along / uRadius * 1.65;
+  float r2 = dot(d, d) / (uRadius * uRadius);
+  float r = sqrt(r2);
   vec4 t = texture(uTarget, vUv);
-  t.x += uAmount * w * dip;
-  t.y += uAmount * w * dip * 0.35;
+  if (r2 < 1.0) {
+    float bottom = -uDepth * sqrt(1.0 - r2);
+    if (t.x > bottom) { t.x = bottom; t.y = min(t.y, 0.0); }
+  }
+  float ring = exp(-pow((r - 1.25) / 0.3, 2.0));
+  t.x += uRidge * ring;
+  t.y += uRidge * 0.4 * ring;
+  float along = dot(d, uDir) / uRadius;
+  float bow = exp(-pow((r - 1.15) / 0.35, 2.0)) * max(along, 0.0);
+  t.x += uMove * bow;
+  t.y += uMove * 0.4 * bow;
   frag = t;
+}`;
+
+// Fluid push for the ball: radial outward when pressing in, plus along the motion.
+export const BALL_VEL = HEADER + `
+uniform sampler2D uTarget;
+uniform vec2 uPoint;
+uniform float uRadius;
+uniform float uPress;    // radial push strength this frame
+uniform vec2 uMoveForce; // directional push (sim texel units)
+uniform float uAspect;
+void main() {
+  vec2 d = vUv - uPoint; d.x *= uAspect;
+  float r = length(d) / uRadius;
+  vec2 radial = d / max(length(d), 1e-5);
+  radial.x /= uAspect;
+  float shell = exp(-pow((r - 1.0) / 0.5, 2.0));
+  float blob = exp(-r * r * 0.8);
+  vec4 t = texture(uTarget, vUv);
+  t.xy += radial * uPress * shell + uMoveForce * blob;
+  frag = t;
+}`;
+
+// Ball mesh placed on the sea at the pointer.
+export const VERT_BALL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec3 aPos;
+in vec3 aCol;
+uniform sampler2D uHeight;
+uniform mat4 uVP;
+uniform vec2 uPoint;
+uniform float uAspect;
+uniform float uHeightScale;
+uniform float uScale;    // ball radius, world units
+uniform float uSink;     // centre height below the water level, world units
+${SWELL_GLSL}
+out vec3 vCol;
+out vec3 vWorld;
+void main() {
+  vec2 wp = worldXY(uPoint, uAspect);
+  float lvl = swellH(wp) * uHeightScale;
+  wp += swellD(wp, uHeightScale);
+  vec3 p = vec3(wp, lvl - uSink) + aPos * uScale;
+  vCol = aCol;
+  vWorld = p;
+  gl_Position = uVP * vec4(p, 1.0);
 }`;

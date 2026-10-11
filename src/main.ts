@@ -1,7 +1,7 @@
 import {
   VERT, ADVECT, SPLAT, DIVERGENCE, JACOBI, GRADIENT_SUBTRACT, BOUNDARY, DISPLAY, WAVE, VERT3D, FRAG3D,
   BOAT_STATE, VERT_BOAT, FRAG_BOAT, PARTICLE_UPDATE, VERT_PARTICLE, FRAG_PARTICLE,
-  PUSH_WAVE,
+  BALL_PUSH, BALL_VEL, VERT_BALL,
 } from './shaders';
 import { Mat4, perspective, lookAt, multiply, ortho } from './mat4';
 
@@ -196,6 +196,32 @@ function buildBoat() {
 }
 buildBoat();
 
+// Ball mesh (unit sphere, flat shaded) for the 3D push tool.
+const ballVao = G.createVertexArray()!;
+let ballVertCount = 0;
+function buildBall() {
+  const v: number[] = [];
+  const col = [0.82, 0.84, 0.86];
+  const N = 16, M = 24;
+  const pt = (i: number, j: number) => {
+    const th = Math.PI * i / N, ph = 2 * Math.PI * j / M;
+    return [Math.sin(th) * Math.cos(ph), Math.sin(th) * Math.sin(ph), Math.cos(th)];
+  };
+  for (let i = 0; i < N; i++) for (let j = 0; j < M; j++) {
+    const a = pt(i, j), b = pt(i + 1, j), c = pt(i + 1, j + 1), d = pt(i, j + 1);
+    v.push(...a, ...col, ...b, ...col, ...c, ...col, ...a, ...col, ...c, ...col, ...d, ...col);
+  }
+  G.bindVertexArray(ballVao);
+  const buf = G.createBuffer()!;
+  G.bindBuffer(G.ARRAY_BUFFER, buf);
+  G.bufferData(G.ARRAY_BUFFER, new Float32Array(v), G.STATIC_DRAW);
+  G.enableVertexAttribArray(0); G.vertexAttribPointer(0, 3, G.FLOAT, false, 24, 0);
+  G.enableVertexAttribArray(1); G.vertexAttribPointer(1, 3, G.FLOAT, false, 24, 12);
+  ballVertCount = v.length / 6;
+  G.bindVertexArray(quadVao);
+}
+buildBall();
+
 // Spray particles: N particles stored in two W x H textures.
 const PART_W = 128, PART_H = isMobile ? 32 : 64, PART_N = PART_W * PART_H;
 const partVao = G.createVertexArray()!; // no attributes; uses gl_VertexID
@@ -268,7 +294,9 @@ const pMesh = new Program(FRAG3D, VERT3D, ['aUv']);
 const pBoatState = new Program(BOAT_STATE);
 const pBoat = new Program(FRAG_BOAT, VERT_BOAT, ['aPos', 'aCol']);
 const pPartUpdate = new Program(PARTICLE_UPDATE);
-const pPushWave = new Program(PUSH_WAVE);
+const pBallPush = new Program(BALL_PUSH);
+const pBallVel = new Program(BALL_VEL);
+const pBall = new Program(FRAG_BOAT, VERT_BALL, ['aPos', 'aCol']);
 const pPart = new Program(FRAG_PARTICLE, VERT_PARTICLE, []);
 
 // ---------- State ----------
@@ -390,7 +418,7 @@ function unproject(sx: number, sy: number): [number, number] | null {
 }
 
 // ---------- Pointer input (mouse + touch via Pointer Events) ----------
-interface Pointer { x: number; y: number; dx: number; dy: number; moved: boolean; sx: number; sy: number; orbit: boolean; }
+interface Pointer { x: number; y: number; dx: number; dy: number; moved: boolean; sx: number; sy: number; orbit: boolean; age: number; }
 const pointers = new Map<number, Pointer>();
 let pinchDist = 0;
 
@@ -407,7 +435,7 @@ canvas.addEventListener('pointerdown', (e) => {
   const [sx, sy] = screenPos(e);
   const p = toSim(sx, sy) ?? [0, 0];
   const orbit = view3D && (e.button === 2 || e.shiftKey);
-  pointers.set(e.pointerId, { x: p[0], y: p[1], dx: 0, dy: 0, moved: false, sx, sy, orbit });
+  pointers.set(e.pointerId, { x: p[0], y: p[1], dx: 0, dy: 0, moved: false, sx, sy, orbit, age: 0 });
   if (pointers.size === 2) {
     const [a, b] = [...pointers.values()];
     pinchDist = Math.hypot(a.sx - b.sx, a.sy - b.sy);
@@ -448,6 +476,33 @@ canvas.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ---------- Simulation step ----------
+// Ball push geometry: radius at the waterline in uv-y units, and how deep it sits.
+function ballRadiusUv() { return 0.04 + (Number(splatSlider.value) / 100) * 0.14; }
+const BALL_SINK_FRAC = 0.55; // centre sits this fraction of the radius below the water level
+
+// Apply the 3D ball push for one pointer this frame (pressing and/or moving).
+function ballPush(p: Pointer, dt: number) {
+  const R = ballRadiusUv();
+  const Rw = R * 2;                           // world units
+  const hs = currentHeightScale();
+  const depth = (Rw * (1 - BALL_SINK_FRAC)) / hs; // underside below the level, height units
+  const entering = Math.exp(-p.age / 5);      // ridge burst as the ball enters
+  const speed = Math.hypot(p.dx, p.dy);
+  let ax = p.dx * aspect, ay = p.dy;
+  const m = Math.hypot(ax, ay);
+  if (m > 1e-6) { ax /= m; ay /= m; } else { ax = 0; ay = 0; }
+  const ridge = depth * 0.25 * entering * dt;
+  const move = Math.min(speed * 8, 0.12) * depth;
+  pBallPush.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', p.x, p.y).f('uRadius', R).f('uDepth', depth)
+    .f('uRidge', ridge).v2('uDir', ax, ay).f('uMove', move).f('uAspect', aspect).tex('uTarget', wave.read.attach(0));
+  blit(wave.write); wave.swap();
+  const press = 10 * entering * dt;
+  const mf = Math.min(speed, 0.04) * 300;
+  pBallVel.use().v2('uTexel', 1 / simW, 1 / simH).v2('uPoint', p.x, p.y).f('uRadius', R).f('uPress', press)
+    .v2('uMoveForce', ax / aspect * mf, ay * mf).f('uAspect', aspect).tex('uTarget', velocity.read.attach(0));
+  blit(velocity.write); velocity.swap();
+}
+
 function splat(x: number, y: number, dx: number, dy: number) {
   const radius = (Number(splatSlider.value) / 100) * 0.01 + 0.0004;
   const force = 1400;
@@ -458,17 +513,7 @@ function splat(x: number, y: number, dx: number, dy: number) {
   blit(velocity.write); velocity.swap();
 
   if (view3D) {
-    // Shove water along the drag: ridge ahead of the brush, trough behind, launching a wave.
-    let ax = dx * aspect, ay = dy;
-    const m = Math.hypot(ax, ay);
-    if (m > 1e-6) {
-      ax /= m; ay /= m;
-      const r = 0.03 + (Number(splatSlider.value) / 100) * 0.12;
-      const amount = Math.min(speed * 4, 0.12);
-      pPushWave.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).v2('uDir', ax, ay)
-        .f('uRadius', r).f('uAmount', amount).f('uAspect', aspect).tex('uTarget', wave.read.attach(0));
-      blit(wave.write); wave.swap();
-    }
+    // Handled per frame by ballPush().
   } else {
     // 2D: brighten the stirred water.
     pSplat.use().v2('uTexel', 1 / dyeW, 1 / dyeH).v2('uPoint', x, y).f('uRadius', radius).f('uAspect', aspect)
@@ -484,6 +529,14 @@ function step(dt0: number) {
   const [velDamp, waveDamp] = DAMP_LEVELS[dampLevel];
 
   for (const p of pointers.values()) {
+    if (view3D && !p.orbit) {
+      const mm = Math.hypot(p.dx, p.dy), cap = 0.04;
+      if (mm > cap) { p.dx *= cap / mm; p.dy *= cap / mm; }
+      ballPush(p, dt0);
+      p.age += dt0;
+      p.dx = 0; p.dy = 0; p.moved = false;
+      continue;
+    }
     if (p.moved && (p.dx !== 0 || p.dy !== 0) && !p.orbit) {
       // Clamp per-frame displacement so unprojection jumps near the horizon can't inject huge forces.
       const m = Math.hypot(p.dx, p.dy), cap = 0.04;
@@ -595,6 +648,19 @@ function drawBoat(vp: Mat4, eye: [number, number, number], heightScale: number) 
   G.bindVertexArray(quadVao);
 }
 
+function drawBalls(vp: Mat4, eye: [number, number, number], heightScale: number) {
+  for (const p of pointers.values()) {
+    if (p.orbit) continue;
+    const R = ballRadiusUv() * 2;
+    pBall.use().m4('uVP', vp).v2('uPoint', p.x, p.y).f('uAspect', aspect).f('uHeightScale', heightScale)
+      .f('uScale', R).f('uSink', R * BALL_SINK_FRAC).v3('uEye', eye[0], eye[1], eye[2])
+      .f('uSwell', swellAmp()).f('uSimTime', simTime).f('uChop', chop()).tex('uHeight', wave.read.attach(0));
+    G.bindVertexArray(ballVao);
+    G.drawArrays(G.TRIANGLES, 0, ballVertCount);
+    G.bindVertexArray(quadVao);
+  }
+}
+
 function render2D(t: number) {
   pDisplay.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uTime', t)
     .tex('uDye', dye.read.attach(0)).tex('uPressure', pressure.read.attach(1)).tex('uVelocity', velocity.read.attach(2));
@@ -640,6 +706,7 @@ function render3D() {
   G.bindVertexArray(quadVao);
   const vp = viewProj();
   drawBoat(vp, eye, heightScale);
+  drawBalls(vp, eye, heightScale);
   drawSpray(vp);
   G.disable(G.DEPTH_TEST);
 }
