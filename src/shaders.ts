@@ -148,10 +148,11 @@ export const SWELL_GLSL = `
 uniform float uSwell;     // amplitude in height units
 uniform float uSimTime;
 uniform float uChop;      // Gerstner steepness multiplier (horizontal displacement)
+uniform vec2 uOrigin;     // world offset of the sim window (endless ocean)
 const vec2 SK0 = vec2(3.6, 1.4), SK1 = vec2(-2.2, 5.2), SK2 = vec2(7.5, -3.0), SK3 = vec2(12.0, 7.0);
 const float SW0 = 1.25, SW1 = 1.6, SW2 = 2.0, SW3 = 2.6;
 const float SA0 = 0.48, SA1 = 0.27, SA2 = 0.15, SA3 = 0.10;
-float sph(vec2 wp, vec2 k, float w, float ph) { return dot(wp, k) - uSimTime * w + ph; }
+float sph(vec2 wp, vec2 k, float w, float ph) { return dot(wp + uOrigin, k) - uSimTime * w + ph; }
 float swellH(vec2 wp) {
   return uSwell * (SA0 * sin(sph(wp, SK0, SW0, 0.0)) + SA1 * sin(sph(wp, SK1, SW1, 1.3))
                  + SA2 * sin(sph(wp, SK2, SW2, 2.1)) + SA3 * sin(sph(wp, SK3, SW3, 0.7)));
@@ -182,6 +183,22 @@ float swellJ(vec2 wp, float hs) {
   return determinant(M);
 }
 vec2 worldXY(vec2 uv, float aspect) { return vec2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0); }
+`;
+
+// Shared sun and sky, used by the water, the boat and the sky pass.
+export const SKY_GLSL = `
+const vec3 SUN = normalize(vec3(0.55, 0.62, 0.30));
+vec3 skyCol(vec3 d) {
+  float t = max(d.z, 0.0);
+  vec3 zenith = vec3(0.07, 0.24, 0.58);
+  vec3 horizon = vec3(0.58, 0.70, 0.84);
+  vec3 c = mix(horizon, zenith, pow(t, 0.42));
+  float sd = max(dot(d, SUN), 0.0);
+  c += vec3(1.0, 0.75, 0.45) * pow(sd, 6.0) * 0.25 * (1.0 - t);   // warm haze toward the sun
+  c += vec3(1.0, 0.85, 0.6) * pow(sd, 40.0) * 0.5;                // glow
+  c += vec3(1.0, 0.95, 0.85) * smoothstep(0.9985, 0.9995, sd) * 4.0; // disc
+  return c;
+}
 `;
 
 // Surface wave equation on the height field (x = height, y = vertical velocity, z = splash).
@@ -224,7 +241,10 @@ void main() {
     if (dot(lc + dy, lc + dy) < 1.0) T = hC;
   }
   float lap = L + R + B + T - 4.0 * hC;
-  float v = clamp((f2.y + uC2 * lap * uDt) * uDamp, -1.0, 1.0);
+  // Sponge layer: absorb waves near the window edges so the endless ocean shows no box walls.
+  vec2 eb = min(vUv, 1.0 - vUv);
+  float sponge = 1.0 - 0.06 * (1.0 - smoothstep(0.0, 0.12, min(eb.x, eb.y)));
+  float v = clamp((f2.y + uC2 * lap * uDt) * uDamp * sponge, -1.0, 1.0);
   float h = clamp(hC + v * uDt, -1.0, 1.0);
   // Whitecaps: the surface breaks where it rises fast enough above the ocean level.
   vec2 wp = worldXY(vUv, uAspect);
@@ -234,8 +254,8 @@ void main() {
 
   if (r2 < 2.5) {
     // Water level the boat floats at: mean of the surface at bow, stern and both beams.
-    vec2 fuv = vec2(fwd.x / uAspect, fwd.y) * uBoatSize * 1.2;
-    vec2 ruv = vec2(side.x / uAspect, side.y) * uBoatSize * 0.6 * 1.2;
+    vec2 fuv = vec2(fwd.x / uAspect, fwd.y) * uBoatSize * 1.45;
+    vec2 ruv = vec2(side.x / uAspect, side.y) * uBoatSize * 0.6 * 1.45;
     float hb = 0.25 * (texture(uField, b.xy + fuv).x + texture(uField, b.xy - fuv).x +
                        texture(uField, b.xy + ruv).x + texture(uField, b.xy - ruv).x);
     if (r2 < 1.0) {
@@ -250,9 +270,13 @@ void main() {
       // Spray when a crest rises above the waterline or the surface slams upward against the hull.
       splash += excess + max(v - 0.012, 0.0) * 3.0 * ring;
       h -= excess * 0.6;
-      v = mix(v, min(v, 0.0), ring);
-      h -= ring * min(b.w * 20.0, 0.15) * uDt;
+      // Wake: relax the ring toward a bounded depression that scales with speed.
+      float wakeDepth = min(b.w * 12.0, 0.08);
+      h -= max(h - (hb - wakeDepth), 0.0) * ring * 0.25 * uDt;
     }
+    // Foam wake trailing the stern, proportional to speed.
+    float trail = exp(-lc.y * lc.y * 2.5) * smoothstep(-0.6, -1.1, lc.x) * exp((lc.x + 1.0) * 0.6);
+    splash += trail * min(b.w * 25.0, 0.35);
   }
   if (isnan(h) || isnan(v)) { h = 0.0; v = 0.0; }
   frag = vec4(h, v, splash, 1.0);
@@ -277,6 +301,7 @@ uniform float uAspect;
 uniform float uHeightScale;
 uniform float uBoatSize;
 uniform float uSpawnRate;
+uniform vec2 uShiftW;   // world shift applied this frame (window re-centre)
 ${SWELL_GLSL}
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 vec2 toUv(vec2 w) { return vec2(w.x / (2.0 * uAspect) + 0.5, w.y * 0.5 + 0.5); }
@@ -286,6 +311,7 @@ void main() {
   float seed = b.w;
   if (seed == 0.0) seed = hash(vUv * 17.0 + 0.3);
   if (a.w > 0.0) {
+    a.xy += uShiftW;
     vec3 vel = b.xyz;
     vel.z -= 0.005 * uDt;
     vel *= pow(0.985, uDt);
@@ -354,7 +380,7 @@ void main() {
   vec4 a = texelFetch(uA, ij, 0);
   vLife = a.w;
   gl_Position = uVP * vec4(a.xyz, 1.0);
-  gl_PointSize = a.w > 0.0 ? uPointScale / gl_Position.w : 0.0;
+  gl_PointSize = a.w > 0.0 ? min(uPointScale / gl_Position.w, 9.0) : 0.0;
 }`;
 
 export const FRAG_PARTICLE = `#version 300 es
@@ -379,6 +405,7 @@ uniform mat4 uVP;
 uniform vec2 uTexel;
 uniform float uAspect;
 uniform float uHeightScale;
+uniform vec2 uBoatUv;
 ${SWELL_GLSL}
 out vec2 vUv;
 out vec3 vPos;
@@ -388,15 +415,19 @@ out float vFold;
 // plus the Gerstner swell.
 vec3 surf(vec2 uv) {
   vec2 wp = worldXY(uv, uAspect);
-  float h = texture(uHeight, uv).x;
+  vec2 eb = min(uv, 1.0 - uv);
+  float inWin = smoothstep(0.0, 0.06, min(eb.x, eb.y));
+  float h = texture(uHeight, uv).x * inWin;
   float hL = texture(uHeight, uv - vec2(uTexel.x, 0.0)).x;
   float hR = texture(uHeight, uv + vec2(uTexel.x, 0.0)).x;
   float hB = texture(uHeight, uv - vec2(0.0, uTexel.y)).x;
   float hT = texture(uHeight, uv + vec2(0.0, uTexel.y)).x;
-  vec2 grad = vec2((hR - hL) / (2.0 * uTexel.x * 2.0 * uAspect), (hT - hB) / (2.0 * uTexel.y * 2.0)) * uHeightScale;
-  vec2 cd = -uChop * 0.008 * grad;
+  vec2 grad = vec2((hR - hL) / (2.0 * uTexel.x * 2.0 * uAspect), (hT - hB) / (2.0 * uTexel.y * 2.0)) * uHeightScale * inWin;
+  vec2 db = (uv - uBoatUv) * vec2(uAspect, 1.0);
+  float nearBoat = smoothstep(0.12, 0.3, length(db));
+  vec2 cd = -uChop * 0.006 * grad * (1.0 - smoothstep(1.5, 5.0, length(grad))) * nearBoat;
   float cl = length(cd);
-  if (cl > 0.03) cd *= 0.03 / cl;
+  if (cl > 0.015) cd *= 0.015 / cl;
   vec2 d = cd + swellD(wp, uHeightScale);
   return vec3(wp + d, (h + swellH(wp)) * uHeightScale);
 }
@@ -430,19 +461,21 @@ uniform float uAspect;
 uniform float uHeightScale;
 ${SWELL_GLSL}
 
-vec3 sky(vec3 d) {
-  float t = clamp(d.z, 0.0, 1.0);
-  vec3 horizon = vec3(0.75, 0.85, 0.95);
-  vec3 zenith = vec3(0.10, 0.30, 0.65);
-  vec3 c = mix(horizon, zenith, pow(t, 0.6));
-  vec3 sun = normalize(vec3(0.4, 0.6, 0.7));
-  c += vec3(1.0, 0.95, 0.85) * pow(max(dot(d, sun), 0.0), 400.0) * 2.0;
-  return c;
-}
+${SKY_GLSL}
 
 void main() {
   vec3 n = normalize(vN);
   if (n.z < 0.0) n = -n;
+  // Small-scale wind ripples (world space, animated) so the near water reads as water.
+  vec2 rp = vPos.xy + uOrigin;
+  float dist0 = length(uEye - vPos);
+  float detail = 1.0 - smoothstep(2.0, 9.0, dist0);
+  vec2 rg = vec2(0.0);
+  rg += vec2(31.0, 12.0) * cos(dot(rp, vec2(31.0, 12.0)) - uSimTime * 7.0) * 0.011;
+  rg += vec2(-18.0, 41.0) * cos(dot(rp, vec2(-18.0, 41.0)) - uSimTime * 9.0 + 1.7) * 0.007;
+  rg += vec2(63.0, -27.0) * cos(dot(rp, vec2(63.0, -27.0)) - uSimTime * 12.0 + 0.4) * 0.004;
+  rg += vec2(-88.0, -55.0) * cos(dot(rp, vec2(-88.0, -55.0)) - uSimTime * 15.0 + 2.9) * 0.0025;
+  n = normalize(vec3(n.xy - rg * detail * (0.35 + 0.65 * uSwell * 2.0), n.z));
 
   vec3 V = normalize(uEye - vPos);
   vec3 Rv = reflect(-V, n);
@@ -450,57 +483,87 @@ void main() {
 
   // Refracted pool floor.
   vec3 Rf = refract(-V, n, 1.0 / 1.333);
-  float depth = 1.2;
-  float t = (-depth - vPos.z) / min(Rf.z, -0.05);
-  vec3 floorP = vPos + Rf * t;
-  vec2 fuv = vec2(floorP.x / (2.0 * uAspect) + 0.5, floorP.y * 0.5 + 0.5);
-  float tile = smoothstep(0.46, 0.5, abs(fract(fuv.x * 8.0) - 0.5)) +
-               smoothstep(0.46, 0.5, abs(fract(fuv.y * 8.0) - 0.5));
-  vec3 floorCol = vec3(0.08, 0.32, 0.46) + tile * 0.05;
-  float outside = step(0.0, -fuv.x) + step(1.0, fuv.x) + step(0.0, -fuv.y) + step(1.0, fuv.y);
-  floorCol = mix(floorCol, vec3(0.05, 0.12, 0.2), clamp(outside, 0.0, 1.0));
-  float absorb = exp(-length(Rf * t) * 1.3);
-  vec3 water = vec3(0.03, 0.22, 0.38);
-  vec3 refr = mix(water, floorCol, absorb);
+  // Open ocean: no visible bottom. Deep water colour, lighter where the refracted ray stays shallow.
+  float shallow = clamp(-Rf.z, 0.0, 1.0);
+  vec3 water = mix(vec3(0.01, 0.10, 0.22), vec3(0.03, 0.24, 0.38), shallow);
+  vec3 refr = water;
   // Light scattering through thin, high crests: a green-blue glow proportional to height.
   float crest = clamp(vPos.z * 2.5, 0.0, 1.0);
-  refr += vec3(0.05, 0.35, 0.40) * crest * (0.4 + 0.6 * max(dot(n, normalize(vec3(0.4, 0.6, 0.7))), 0.0));
+  refr += vec3(0.05, 0.35, 0.40) * crest * (0.4 + 0.6 * max(dot(n, SUN), 0.0));
 
-  vec3 col = mix(refr, sky(Rv), fresnel);
-  vec3 sun = normalize(vec3(0.4, 0.6, 0.7));
-  vec3 H = normalize(sun + V);
-  col += vec3(1.0) * pow(max(dot(n, H), 0.0), 120.0) * 0.8;
+  vec3 col = mix(refr, skyCol(Rv), fresnel);
+  vec3 H = normalize(SUN + V);
+  col += vec3(1.0, 0.95, 0.85) * pow(max(dot(n, H), 0.0), 160.0) * 1.2;
+  col += vec3(1.0, 0.9, 0.7) * pow(max(dot(n, H), 0.0), 900.0) * 3.0 * detail; // glitter
   float speed = length(texture(uVelocity, vUv).xy);
   col += vec3(0.15, 0.2, 0.2) * min(speed * 0.05, 0.4);
   // Foam on breaking crests.
-  float foam = clamp(texture(uHeight, vUv).z * 12.0 + vFold, 0.0, 1.0);
+  vec2 ebf = min(vUv, 1.0 - vUv);
+  float inWinF = smoothstep(0.0, 0.06, min(ebf.x, ebf.y));
+  float foam = clamp(texture(uHeight, vUv).z * 12.0 * inWinF + vFold, 0.0, 1.0);
   float fn = fract(sin(dot(floor(vUv * 900.0), vec2(12.9898, 78.233))) * 43758.5453);
   col = mix(col, vec3(0.92, 0.96, 1.0), foam * (0.55 + 0.45 * fn));
+  // Aerial perspective toward the horizon.
+  float dist = length(uEye - vPos);
+  float fog = 1.0 - exp(-dist * 0.10);
+  col = mix(col, skyCol(vec3(normalize(vPos.xy - uEye.xy), 0.02)), fog);
   frag = vec4(col, 1.0);
 }`;
 
-// 1x1 boat state texture: xy = position (uv), z = heading, w = speed (uv/frame).
-export const BOAT_STATE = HEADER + `
-uniform sampler2D uState;
+// Boat info for the CPU (2x1): texel 0 = (hull centre z, pitch, roll, 0); texel 1 = (water velocity xy, 0, 0).
+export const BOAT_INFO = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+in vec2 vUv;
+out vec4 frag;
+uniform sampler2D uHeight;
 uniform sampler2D uVelocity;
-uniform float uDt;
+uniform sampler2D uBoat;
 uniform float uAspect;
+uniform float uHeightScale;
+uniform float uScale;
+${SWELL_GLSL}
+vec3 world(vec2 uv) {
+  vec2 wp = worldXY(uv, uAspect);
+  float h = texture(uHeight, uv).x + swellH(wp);
+  return vec3(wp + swellD(wp, uHeightScale), h * uHeightScale);
+}
 void main() {
-  vec4 s = texelFetch(uState, ivec2(0), 0);
-  vec2 pos = s.xy;
-  if (pos == vec2(0.0) || any(isnan(s)) || any(isinf(s))) { pos = vec2(0.5); s = vec4(pos, 0.0, 0.0); }
-  vec2 vel = texture(uVelocity, pos).xy * uTexel; // uv per frame
-  vec2 drift = vel * uDt * 0.5;
-  vec2 np = clamp(pos + drift, vec2(0.06), vec2(0.94));
-  float speed = length(np - pos);
+  vec4 s = texelFetch(uBoat, ivec2(0), 0);
+  vec2 uv = s.xy;
   float heading = s.z;
-  if (speed > 1e-5) {
-    vec2 d = (np - pos); d.x *= uAspect;
-    float target = atan(d.y, d.x);
-    float diff = mod(target - heading + 3.14159265, 6.2831853) - 3.14159265;
-    heading += diff * min(1.0, speed * 400.0) * 0.15;
-  }
-  frag = vec4(np, heading, speed);
+  vec2 fwdUv = vec2(cos(heading) / uAspect, sin(heading));
+  vec2 rgtUv = vec2(sin(heading) / uAspect, -cos(heading));
+  float hl = uScale * 0.25 * 1.45;
+  vec3 pf = world(uv + fwdUv * hl), pb = world(uv - fwdUv * hl);
+  vec3 pr = world(uv + rgtUv * hl * 0.6), pl = world(uv - rgtUv * hl * 0.6);
+  vec3 fwd = normalize(pf - pb);
+  vec3 rgt = normalize(pr - pl);
+  vec3 c = (pf + pb + pr + pl) * 0.25;
+  if (vUv.x > 0.5) { frag = vec4(texture(uVelocity, uv).xy, c.xy); return; }
+  frag = vec4(c.z, asin(clamp(fwd.z, -1.0, 1.0)), asin(clamp(-rgt.z, -1.0, 1.0)), 1.0);
+}`;
+
+// Shift a field by uShift (uv) when the sim window re-centres on the boat; outside = 0.
+export const SHIFT = HEADER + `
+uniform sampler2D uSrc;
+uniform vec2 uShift;
+void main() {
+  vec2 src = vUv - uShift;
+  if (any(lessThan(src, vec2(0.0))) || any(greaterThan(src, vec2(1.0)))) { frag = vec4(0.0); return; }
+  frag = texture(uSrc, src);
+}`;
+
+// Full-screen sky pass: reconstruct the view ray from the camera basis.
+export const SKY_PASS = HEADER + `
+uniform vec3 uFwd, uRight, uUp;
+uniform float uTanHalfFov;
+uniform float uAspect2;
+${SKY_GLSL}
+void main() {
+  vec2 ndc = vUv * 2.0 - 1.0;
+  vec3 d = normalize(uFwd + ndc.x * uTanHalfFov * uAspect2 * uRight + ndc.y * uTanHalfFov * uUp);
+  frag = vec4(skyCol(d), 1.0);
 }`;
 
 export const VERT_BOAT = `#version 300 es
@@ -515,6 +578,7 @@ uniform vec2 uTexel;
 uniform float uAspect;
 uniform float uHeightScale;
 uniform float uScale;
+uniform float uBank;
 ${SWELL_GLSL}
 out vec3 vCol;
 out vec3 vWorld;
@@ -530,7 +594,7 @@ void main() {
   vec2 fwdUv = vec2(cos(heading) / uAspect, sin(heading));
   vec2 rgtUv = vec2(sin(heading) / uAspect, -cos(heading));
   // Sample the surface just outside the hull footprint (bow, stern, both beams) for the attitude.
-  float hl = uScale * 0.25 * 1.2;   // half-length in uv-y units, 20% outside the hull
+  float hl = uScale * 0.25 * 1.45;   // half-length in uv-y units, 20% outside the hull
   vec3 pf = world(uv + fwdUv * hl);
   vec3 pb = world(uv - fwdUv * hl);
   vec3 pr = world(uv + rgtUv * hl * 0.6);
@@ -540,6 +604,11 @@ void main() {
   vec3 up = normalize(cross(fwd, rgt));
   if (up.z < 0.0) { up = -up; }
   rgt = normalize(cross(up, fwd));
+  // Bank (lean) about the forward axis.
+  float cb = cos(uBank), sb = sin(uBank);
+  vec3 rgt2 = rgt * cb + up * sb;
+  up = normalize(cross(fwd, rgt2));
+  rgt = rgt2;
   vec3 center = (pf + pb + pr + pl) * 0.25;
   vec3 p = center + (aPos.x * fwd + aPos.y * rgt + aPos.z * up) * uScale;
   vCol = aCol;
@@ -553,14 +622,17 @@ in vec3 vCol;
 in vec3 vWorld;
 out vec4 frag;
 uniform vec3 uEye;
+${SKY_GLSL}
 void main() {
   vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
-  vec3 sun = normalize(vec3(0.4, 0.6, 0.7));
+  vec3 sun = SUN;
   vec3 V = normalize(uEye - vWorld);
   float diff = max(dot(n, sun), 0.0);
   vec3 H = normalize(sun + V);
   float spec = pow(max(dot(n, H), 0.0), 40.0) * 0.3;
-  vec3 col = vCol * (0.35 + 0.65 * diff) + spec;
+  vec3 col = vCol * (0.35 + 0.65 * diff) + spec * vec3(1.0, 0.95, 0.85);
+  float dist = length(uEye - vWorld);
+  col = mix(col, skyCol(vec3(normalize(vWorld.xy - uEye.xy), 0.02)), 1.0 - exp(-dist * 0.10));
   frag = vec4(col, 1.0);
 }`;
 

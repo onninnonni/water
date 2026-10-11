@@ -20,7 +20,22 @@
     button:hover { background: #1e3a55; }
     button.active { background: #2f7fd1; border-color: #5fa8ff; }
     #fps { position: fixed; right: 12px; top: 12px; font-size: 12px; opacity: 0.6; font-variant-numeric: tabular-nums; }
+    #showui { position: fixed; top: 12px; left: 12px; display: none; width: 36px; height: 36px; padding: 0; font-size: 18px; }
+    body.hideui #ui { display: none; }
+    body.hideui #showui { display: block; }
+    #hud { position: fixed; right: 18px; bottom: 18px; text-align: right; display: none; text-shadow: 0 1px 6px rgba(0,0,0,0.6); }
+    body.helm #hud { display: block; }
+    #hud #knots { font-size: 44px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+    #hud .unit { font-size: 12px; opacity: 0.75; letter-spacing: 0.2em; text-transform: uppercase; }
+    #hud #hdg { font-size: 13px; opacity: 0.8; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    #touchhint { position: fixed; inset: 0; display: none; pointer-events: none; }
+    body.helm.touch #touchhint { display: flex; }
+    #touchhint span { flex: 1; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 28px;
+      font-size: 11px; letter-spacing: 0.25em; text-transform: uppercase; opacity: 0.45; }
+    #touchhint span + span { border-left: 1px solid rgba(255,255,255,0.12); }
+    body.helm #ui { opacity: 0.85; }
     .only3d { display: none; }
+    body.helm .only3d { display: flex; }
     body.view3d .only3d { display: flex; }
     .hint { opacity: 0.7; font-size: 12px; margin-top: 8px; }
   </style>
@@ -28,6 +43,9 @@
 <body>
   <canvas id="c"></canvas>
   <div id="fps"></div>
+  <button id="showui">☰</button>
+  <div id="hud"><div id="knots">0</div><div class="unit">knots</div><div id="hdg"></div></div>
+  <div id="touchhint"><span>steer</span><span>throttle</span></div>
   <div id="ui">
     <h1>Water · Navier–Stokes (WebGL2)</h1>
     <div class="row">
@@ -45,6 +63,7 @@
       <div class="btns" id="view">
         <button data-view="2d" class="active">2D</button>
         <button data-view="3d">3D</button>
+        <button data-view="helm">Helm</button>
       </div>
     </div>
     <div class="row">
@@ -66,7 +85,7 @@
     </div>
     <div class="row only3d">
       <label for="curl">Curl</label>
-      <input id="curl" type="range" min="0" max="100" value="70" />
+      <input id="curl" type="range" min="0" max="100" value="50" />
     </div>
     <div class="row only3d">
       <label for="height">Wave height</label>
@@ -74,6 +93,8 @@
     </div>
     <div class="btns">
       <button id="boat" class="active">Boat</button>
+      <button id="sound">Sound</button>
+      <button id="hideui">Hide</button>
       <button id="reset">Reset</button>
       <button id="pause">Pause</button>
     </div>
