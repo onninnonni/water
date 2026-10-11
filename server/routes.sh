@@ -14,7 +14,7 @@ ensure() { # $1 id, $2 insert url, $3 json
   [ "$code" = "200" ] && return 0
   curl -s -o /dev/null -w "caddy route $1: HTTP %{http_code}\n" -X PUT "$2" -H 'Content-Type: application/json' -d "$3"
 }
-points_here() { dig +short "$1" A @1.1.1.1 | grep -qx "$IP"; }
+points_here() { r=$(dig +short "$1" A @ns1.dnsdomene.net | grep -E "^[0-9.]+$"); [ -n "$r" ] && ! echo "$r" | grep -vqx "$IP"; }
 ensure onni-seas-ws "$SUB" '{"@id":"onni-seas-ws","match":[{"path":["/onni/seas/ws/*"]}],"handle":[{"handler":"reverse_proxy","upstreams":[{"dial":"127.0.0.1:8798"}]}],"terminal":true}'
 ensure onni-juha-water-redir "$SUB" '{"@id":"onni-juha-water-redir","match":[{"path":["/juha/water"]}],"handle":[{"handler":"static_response","status_code":308,"headers":{"Location":["/juha/water/"]}}],"terminal":true}'
 ensure onni-juha-water "$SUB" '{"@id":"onni-juha-water","match":[{"path":["/juha/water/*"]}],"handle":[{"handler":"rewrite","strip_path_prefix":"/juha/water"},{"handler":"file_server","root":"/srv/www/onni/juha-water"}],"terminal":true}'
