@@ -1,12 +1,12 @@
 import {
   VERT, ADVECT, SPLAT, DIVERGENCE, JACOBI, GRADIENT_SUBTRACT, BOUNDARY, DISPLAY, WAVE, VERT3D, FRAG3D,
-  BOAT_STATE, VERT_BOAT, FRAG_BOAT,
+  BOAT_STATE, VERT_BOAT, FRAG_BOAT, PARTICLE_UPDATE, VERT_PARTICLE, FRAG_PARTICLE,
 } from './shaders';
 import { Mat4, perspective, lookAt, multiply, ortho } from './mat4';
 
 // ---------- WebGL setup ----------
 const canvas = document.getElementById('c') as HTMLCanvasElement;
-const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance' });
+const gl = canvas.getContext('webgl2', { antialias: new URLSearchParams(location.search).get('aa') === '1', alpha: false, powerPreference: 'high-performance' });
 if (!gl) throw new Error('WebGL2 is required');
 const G: WebGL2RenderingContext = gl;
 
@@ -38,11 +38,14 @@ if (!probed) throw new Error('Float render targets are not supported on this dev
 const FMT: TexFormat = probed;
 
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || navigator.maxTouchPoints > 1;
-const SIM_RES = isMobile ? 160 : 256;
-const DYE_RES = isMobile ? 384 : 768;
-const MESH_RES = isMobile ? 192 : 320;
-const PRESSURE_ITERS = isMobile ? 24 : 40;
-const VISC_ITERS = isMobile ? 12 : 20;
+const Q = new URLSearchParams(location.search);
+const qn = (k: string, d: number) => { const v = Q.get(k); return v === null ? d : Number(v); };
+const SIM_RES = qn('sim', isMobile ? 160 : 256);
+const DYE_RES = qn('dye', isMobile ? 384 : 640);
+const MESH_RES = qn('mesh', isMobile ? 160 : 256);
+const PRESSURE_ITERS = qn('pi', isMobile ? 20 : 30);
+const VISC_ITERS = qn('vi', isMobile ? 8 : 12);
+const MAX_DPR = qn('dpr', 1.5);
 
 // ---------- Shader helpers ----------
 function compile(type: number, src: string): WebGLShader {
@@ -115,7 +118,9 @@ function buildMesh(nx: number, ny: number) {
   G.bindVertexArray(quadVao);
 }
 
-// Boat: low-poly hull + deck + cabin, flat shaded. Local frame: x forward, y starboard, z up.
+// Boat: motor launch with rounded hull (white topsides over a red bottom), sheer line rising to
+// the bow, deck with cockpit, cabin with window band and raked windshield, roof and mast.
+// Flat shaded. Local frame: x forward, y starboard, z up; z = 0 is the waterline.
 const boatVao = G.createVertexArray()!;
 let boatVertCount = 0;
 function buildBoat() {
@@ -123,30 +128,62 @@ function buildBoat() {
   type P = [number, number, number];
   const tri = (a: P, b: P, c: P, col: P) => { for (const q of [a, b, c]) v.push(...q, ...col); };
   const quad = (a: P, b: P, c: P, d: P, col: P) => { tri(a, b, c, col); tri(a, c, d, col); };
-  const HULL: P = [0.62, 0.16, 0.12], DECK: P = [0.85, 0.70, 0.45], CABIN: P = [0.95, 0.95, 0.92], ROOF: P = [0.35, 0.38, 0.42];
-  const N = 14, G0 = 0.14; // gunwale height
+  const box = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number, col: P, top: P = col) => {
+    quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], col);
+    quad([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], col);
+    quad([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], col);
+    quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], col);
+    quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], top);
+  };
+  const BOTTOM: P = [0.70, 0.14, 0.10], TOPSIDE: P = [0.96, 0.96, 0.94], STRIPE: P = [0.10, 0.22, 0.40];
+  const DECK: P = [0.80, 0.64, 0.42], COCKPIT: P = [0.55, 0.42, 0.28], CABIN: P = [0.97, 0.97, 0.95];
+  const GLASS: P = [0.15, 0.22, 0.30], ROOF: P = [0.92, 0.92, 0.90], METAL: P = [0.75, 0.76, 0.78];
+  const N = 18;
   const sect = (i: number) => {
-    const t = i / N;                           // 0 = stern, 1 = bow
+    const t = i / N;                                   // 0 = stern, 1 = bow
     const x = -0.5 + t;
-    const w = 0.30 * Math.pow(Math.sin(Math.PI * (0.12 + 0.88 * t * 0.92)), 0.7) * (1 - 0.25 * t * t);
-    const k = 0.14 * (0.6 + 0.4 * Math.sin(Math.PI * t)) * (1 - 0.6 * t * t * t);
-    return { L: [x, -w, G0] as P, R: [x, w, G0] as P, K: [x, 0, -k] as P };
+    const w = 0.32 * Math.pow(Math.sin(Math.PI * (0.10 + 0.90 * t * 0.93)), 0.65) * (1 - 0.3 * t * t);
+    const k = 0.15 * (0.55 + 0.45 * Math.sin(Math.PI * Math.min(t * 1.2, 1))) * (1 - 0.7 * t * t * t);
+    const g = 0.15 + 0.10 * t * t;                     // sheer rises toward the bow
+    return {
+      GL: [x, -w, g] as P, GR: [x, w, g] as P,         // gunwale
+      SL: [x, -w * 1.02, 0.03] as P, SR: [x, w * 1.02, 0.03] as P, // waterline stripe top
+      CL: [x, -w * 0.97, -0.02] as P, CR: [x, w * 0.97, -0.02] as P, // chine at the waterline
+      BL: [x, -w * 0.55, -k * 0.75] as P, BR: [x, w * 0.55, -k * 0.75] as P, // bilge
+      K: [x, 0, -k] as P,
+    };
   };
   const secs = Array.from({ length: N + 1 }, (_, i) => sect(i));
   for (let i = 0; i < N; i++) {
     const a = secs[i], b = secs[i + 1];
-    quad(a.L, a.K, b.K, b.L, HULL);
-    quad(a.R, b.R, b.K, a.K, HULL);
-    quad(a.L, b.L, b.R, a.R, DECK);
+    quad(a.GL, a.SL, b.SL, b.GL, TOPSIDE); quad(a.GR, b.GR, b.SR, a.SR, TOPSIDE);
+    quad(a.SL, a.CL, b.CL, b.SL, STRIPE);  quad(a.SR, b.SR, b.CR, a.CR, STRIPE);
+    quad(a.CL, a.BL, b.BL, b.CL, BOTTOM);  quad(a.CR, b.CR, b.BR, a.BR, BOTTOM);
+    quad(a.BL, a.K, b.K, b.BL, BOTTOM);    quad(a.BR, b.BR, b.K, a.K, BOTTOM);
+    quad(a.GL, b.GL, b.GR, a.GR, DECK);
   }
-  const st = secs[0]; tri(st.L, st.R, st.K, HULL); // transom
-  // Cabin box
-  const x0 = -0.22, x1 = 0.08, y = 0.15, z0 = G0, z1 = 0.34;
-  quad([x0, -y, z0], [x1, -y, z0], [x1, -y, z1], [x0, -y, z1], CABIN);
-  quad([x0, y, z0], [x0, y, z1], [x1, y, z1], [x1, y, z0], CABIN);
-  quad([x1, -y, z0], [x1, y, z0], [x1, y, z1], [x1, -y, z1], CABIN);
-  quad([x0, -y, z0], [x0, -y, z1], [x0, y, z1], [x0, y, z0], CABIN);
-  quad([x0, -y, z1], [x1, -y, z1], [x1, y, z1], [x0, y, z1], ROOF);
+  const st = secs[0]; // transom
+  for (const [p0, p1] of [[st.GL, st.SL], [st.SL, st.CL], [st.CL, st.BL], [st.BL, st.K], [st.K, st.BR], [st.BR, st.CR], [st.CR, st.SR], [st.SR, st.GR]] as [P, P][]) {
+    tri([st.GL[0], 0, 0.1], p0, p1, TOPSIDE);
+  }
+  tri(st.GL, [st.GL[0], 0, 0.1], st.GR, TOPSIDE);
+  // Cockpit (recessed deck) at the stern
+  box(-0.47, -0.18, -0.2, 0.2, 0.08, 0.151, COCKPIT);
+  // Cabin: lower white band, dark window band, roof, raked windshield
+  const cx0 = -0.18, cx1 = 0.16, cy = 0.2, g0 = 0.15;
+  box(cx0, cx1, -cy, cy, g0, g0 + 0.12, CABIN);
+  box(cx0 + 0.01, cx1 - 0.03, -cy + 0.005, cy - 0.005, g0 + 0.12, g0 + 0.22, GLASS);
+  // Windshield wedge
+  quad([cx1 - 0.03, -cy, g0 + 0.12], [cx1 + 0.07, -cy * 0.9, g0 + 0.12], [cx1 - 0.03, -cy * 0.9, g0 + 0.24], [cx1 - 0.03, -cy, g0 + 0.24], GLASS);
+  quad([cx1 - 0.03, cy, g0 + 0.12], [cx1 - 0.03, cy, g0 + 0.24], [cx1 - 0.03, cy * 0.9, g0 + 0.24], [cx1 + 0.07, cy * 0.9, g0 + 0.12], GLASS);
+  quad([cx1 + 0.07, -cy * 0.9, g0 + 0.12], [cx1 + 0.07, cy * 0.9, g0 + 0.12], [cx1 - 0.03, cy * 0.9, g0 + 0.24], [cx1 - 0.03, -cy * 0.9, g0 + 0.24], GLASS);
+  box(cx0 - 0.02, cx1 - 0.01, -cy - 0.02, cy + 0.02, g0 + 0.22, g0 + 0.245, ROOF);
+  // Mast and nav light
+  box(-0.05, -0.03, -0.01, 0.01, g0 + 0.245, g0 + 0.42, METAL);
+  box(-0.055, -0.025, -0.015, 0.015, g0 + 0.42, g0 + 0.44, [1.0, 0.3, 0.2]);
+  // Bow rail
+  box(0.30, 0.44, -0.012, 0.012, 0.25, 0.27, METAL);
+
   G.bindVertexArray(boatVao);
   const buf = G.createBuffer()!;
   G.bindBuffer(G.ARRAY_BUFFER, buf);
@@ -157,6 +194,10 @@ function buildBoat() {
   G.bindVertexArray(quadVao);
 }
 buildBoat();
+
+// Spray particles: N particles stored in two W x H textures.
+const PART_W = 64, PART_H = isMobile ? 16 : 32, PART_N = PART_W * PART_H;
+const partVao = G.createVertexArray()!; // no attributes; uses gl_VertexID
 
 // ---------- Framebuffers ----------
 interface FBO { tex: WebGLTexture; fb: WebGLFramebuffer; w: number; h: number; attach(unit: number): number; }
@@ -193,6 +234,19 @@ function createDoubleFBO(w: number, h: number): DoubleFBO {
   };
 }
 
+interface MRT { a: FBO; b: FBO; fb: WebGLFramebuffer; }
+function createMRT(w: number, h: number): MRT {
+  const a = createFBO(w, h), b = createFBO(w, h);
+  const fb = G.createFramebuffer()!;
+  G.bindFramebuffer(G.FRAMEBUFFER, fb);
+  G.framebufferTexture2D(G.FRAMEBUFFER, G.COLOR_ATTACHMENT0, G.TEXTURE_2D, a.tex, 0);
+  G.framebufferTexture2D(G.FRAMEBUFFER, G.COLOR_ATTACHMENT1, G.TEXTURE_2D, b.tex, 0);
+  G.drawBuffers([G.COLOR_ATTACHMENT0, G.COLOR_ATTACHMENT1]);
+  if (G.checkFramebufferStatus(G.FRAMEBUFFER) !== G.FRAMEBUFFER_COMPLETE) throw new Error('MRT incomplete');
+  return { a, b, fb };
+}
+let partRead = createMRT(PART_W, PART_H), partWrite = createMRT(PART_W, PART_H);
+
 function blit(target: FBO | null) {
   G.bindVertexArray(quadVao);
   if (target) { G.bindFramebuffer(G.FRAMEBUFFER, target.fb); G.viewport(0, 0, target.w, target.h); }
@@ -212,17 +266,20 @@ const pDisplay = new Program(DISPLAY);
 const pMesh = new Program(FRAG3D, VERT3D, ['aUv']);
 const pBoatState = new Program(BOAT_STATE);
 const pBoat = new Program(FRAG_BOAT, VERT_BOAT, ['aPos', 'aCol']);
+const pPartUpdate = new Program(PARTICLE_UPDATE);
+const pPart = new Program(FRAG_PARTICLE, VERT_PARTICLE, []);
 
 // ---------- State ----------
 // dye: 2D view's surface shading field (original look). wave: 3D view's height field (x = h, y = dh/dt).
 let velocity!: DoubleFBO, pressure!: DoubleFBO, divergence!: FBO, viscB!: FBO, dye!: DoubleFBO, wave!: DoubleFBO;
 const boatState = createDoubleFBO(1, 1);
-const BOAT_SCALE = 0.26;
+const BOAT_SCALE = 0.34;
+const BOAT_DRAFT = 0.15; // keel depth in boat units
 let simW = 0, simH = 0, dyeW = 0, dyeH = 0;
 let aspect = 1;
 
 function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
+  const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
   const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
   if (w === 0 || h === 0) return; // not laid out yet; try again next frame
   if (canvas.width === w && canvas.height === h && velocity) return;
@@ -290,7 +347,7 @@ viewButtons.forEach((b) => b.addEventListener('click', () => {
 }));
 function clearAll() {
   for (const f of [velocity.read, velocity.write, pressure.read, pressure.write, divergence, viscB, dye.read, dye.write,
-    wave.read, wave.write, boatState.read, boatState.write]) {
+    wave.read, wave.write, boatState.read, boatState.write, partRead.a, partRead.b, partWrite.a, partWrite.b]) {
     G.bindFramebuffer(G.FRAMEBUFFER, f.fb); G.clearColor(0, 0, 0, 0); G.clear(G.COLOR_BUFFER_BIT);
   }
 }
@@ -491,13 +548,26 @@ function step(dt0: number) {
   const wdt = dt0;
   const c2 = Math.min(0.3, 0.4 / Math.max(wdt * wdt, 1e-3));
   const wd = Math.pow(waveDamp * (1 - 0.01 * nu), 1 / subs); // viscosity also damps the surface a little
+  const heightScale = currentHeightScale();
   pWave.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', wdt).f('uC2', c2).f('uDamp', wd)
     .f('uAspect', aspect).f('uBoatSize', showBoat ? BOAT_SCALE * 0.25 : 0.0001)
+    .f('uDraft', BOAT_SCALE * BOAT_DRAFT / heightScale)
     .tex('uBoat', boatState.read.attach(1));
   for (let i = 0; i < subs; i++) {
     pWave.tex('uField', wave.read.attach(0));
     blit(wave.write); wave.swap();
   }
+
+  // 11 (3D). Spray particles thrown off the hull.
+  pPartUpdate.use().f('uDt', dt0).f('uTime', (performance.now() % 100000) / 1000).f('uAspect', aspect)
+    .f('uHeightScale', heightScale).f('uBoatSize', BOAT_SCALE * 0.25).f('uSpawnRate', showBoat ? 1 : 0)
+    .tex('uA', partRead.a.attach(0)).tex('uB', partRead.b.attach(1))
+    .tex('uField', wave.read.attach(2)).tex('uBoat', boatState.read.attach(3));
+  G.bindVertexArray(quadVao);
+  G.bindFramebuffer(G.FRAMEBUFFER, partWrite.fb);
+  G.viewport(0, 0, PART_W, PART_H);
+  G.drawArrays(G.TRIANGLE_STRIP, 0, 4);
+  const t = partRead; partRead = partWrite; partWrite = t;
 }
 
 function drawBoat(vp: Mat4, eye: [number, number, number], heightScale: number) {
@@ -521,9 +591,25 @@ function render2D(t: number) {
   G.disable(G.DEPTH_TEST);
 }
 
+function currentHeightScale() { return 0.06 + (Number(heightSlider.value) / 100) * 0.5; }
+
+function drawSpray(vp: Mat4) {
+  if (!showBoat) return;
+  pPart.use().m4('uVP', vp).f('uPointScale', canvas.height * 0.012).tex('uA', partRead.a.attach(0));
+  G.uniform1i(pPart.uniforms.get('uTexW')!, PART_W);
+  G.enable(G.BLEND);
+  G.blendFunc(G.SRC_ALPHA, G.ONE_MINUS_SRC_ALPHA);
+  G.depthMask(false);
+  G.bindVertexArray(partVao);
+  G.drawArrays(G.POINTS, 0, PART_N);
+  G.bindVertexArray(quadVao);
+  G.depthMask(true);
+  G.disable(G.BLEND);
+}
+
 function render3D() {
   const eye = cameraEye();
-  const heightScale = 0.06 + (Number(heightSlider.value) / 100) * 0.5;
+  const heightScale = currentHeightScale();
   G.bindFramebuffer(G.FRAMEBUFFER, null);
   G.viewport(0, 0, canvas.width, canvas.height);
   G.clearColor(0.03, 0.07, 0.12, 1);
@@ -535,12 +621,18 @@ function render3D() {
   G.bindVertexArray(meshVao);
   G.drawElements(G.TRIANGLES, meshIndexCount, G.UNSIGNED_INT, 0);
   G.bindVertexArray(quadVao);
-  drawBoat(viewProj(), eye, heightScale);
+  const vp = viewProj();
+  drawBoat(vp, eye, heightScale);
+  drawSpray(vp);
   G.disable(G.DEPTH_TEST);
 }
 
+const fpsEl = $<HTMLDivElement>('fps');
+let fpsAcc = 0, fpsN = 0, fpsT = performance.now();
 let last = performance.now();
 function frame(now: number) {
+  fpsN++;
+  if (now - fpsT > 500) { fpsAcc = fpsN * 1000 / (now - fpsT); fpsN = 0; fpsT = now; fpsEl.textContent = fpsAcc.toFixed(0) + ' fps'; }
   const dt = Math.min((now - last) / 1000, 1 / 30);
   last = now;
   resize();
@@ -550,6 +642,15 @@ function frame(now: number) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// Benchmark hook (dev only): ms per frame with a GPU sync, independent of rAF throttling.
+(window as unknown as { __bench: (n?: number) => unknown }).__bench = (n = 30) => {
+  const time = (fn: () => void) => { G.finish(); const t0 = performance.now(); for (let i = 0; i < n; i++) fn(); G.finish(); return (performance.now() - t0) / n; };
+  const r: Record<string, number> = {};
+  r.step = time(() => step(1));
+  r.render = time(() => (view3D ? render3D() : render2D(0)));
+  return r;
+};
 
 // Debug readback (dev only): sample the sim textures.
 (window as unknown as { __dbg: () => unknown }).__dbg = () => {
