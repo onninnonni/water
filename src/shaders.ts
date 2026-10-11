@@ -145,23 +145,41 @@ void main() {
 
 // Analytic ocean swell layered on top of the simulated height field (wp = world xy / uSimTime s).
 export const SWELL_GLSL = `
-uniform float uSwell;
+uniform float uSwell;     // amplitude in height units
 uniform float uSimTime;
-const vec2 SK0 = vec2(7.0, 3.0), SK1 = vec2(-4.5, 10.0), SK2 = vec2(14.0, -5.5), SK3 = vec2(21.0, 12.0);
-const float SW0 = 1.6, SW1 = 2.1, SW2 = 2.7, SW3 = 3.3;
-const float SA0 = 0.43, SA1 = 0.26, SA2 = 0.17, SA3 = 0.13;
+uniform float uChop;      // Gerstner steepness multiplier (horizontal displacement)
+const vec2 SK0 = vec2(3.6, 1.4), SK1 = vec2(-2.2, 5.2), SK2 = vec2(7.5, -3.0), SK3 = vec2(12.0, 7.0);
+const float SW0 = 1.25, SW1 = 1.6, SW2 = 2.0, SW3 = 2.6;
+const float SA0 = 0.48, SA1 = 0.27, SA2 = 0.15, SA3 = 0.10;
+float sph(vec2 wp, vec2 k, float w, float ph) { return dot(wp, k) - uSimTime * w + ph; }
 float swellH(vec2 wp) {
-  return uSwell * (SA0 * sin(dot(wp, SK0) - uSimTime * SW0) + SA1 * sin(dot(wp, SK1) - uSimTime * SW1 + 1.3)
-                 + SA2 * sin(dot(wp, SK2) - uSimTime * SW2 + 2.1) + SA3 * sin(dot(wp, SK3) - uSimTime * SW3 + 0.7));
+  return uSwell * (SA0 * sin(sph(wp, SK0, SW0, 0.0)) + SA1 * sin(sph(wp, SK1, SW1, 1.3))
+                 + SA2 * sin(sph(wp, SK2, SW2, 2.1)) + SA3 * sin(sph(wp, SK3, SW3, 0.7)));
 }
 vec2 swellG(vec2 wp) {
-  return uSwell * (SA0 * cos(dot(wp, SK0) - uSimTime * SW0) * SK0 + SA1 * cos(dot(wp, SK1) - uSimTime * SW1 + 1.3) * SK1
-                 + SA2 * cos(dot(wp, SK2) - uSimTime * SW2 + 2.1) * SK2 + SA3 * cos(dot(wp, SK3) - uSimTime * SW3 + 0.7) * SK3);
+  return uSwell * (SA0 * cos(sph(wp, SK0, SW0, 0.0)) * SK0 + SA1 * cos(sph(wp, SK1, SW1, 1.3)) * SK1
+                 + SA2 * cos(sph(wp, SK2, SW2, 2.1)) * SK2 + SA3 * cos(sph(wp, SK3, SW3, 0.7)) * SK3);
 }
 // Vertical swell velocity in height units per frame (60 fps frames).
 float swellV(vec2 wp) {
-  return -uSwell / 60.0 * (SA0 * SW0 * cos(dot(wp, SK0) - uSimTime * SW0) + SA1 * SW1 * cos(dot(wp, SK1) - uSimTime * SW1 + 1.3)
-                         + SA2 * SW2 * cos(dot(wp, SK2) - uSimTime * SW2 + 2.1) + SA3 * SW3 * cos(dot(wp, SK3) - uSimTime * SW3 + 0.7));
+  return -uSwell / 60.0 * (SA0 * SW0 * cos(sph(wp, SK0, SW0, 0.0)) + SA1 * SW1 * cos(sph(wp, SK1, SW1, 1.3))
+                         + SA2 * SW2 * cos(sph(wp, SK2, SW2, 2.1)) + SA3 * SW3 * cos(sph(wp, SK3, SW3, 0.7)));
+}
+// Gerstner horizontal displacement (world units) for a given height scale: crests sharpen and lean.
+vec2 swellD(vec2 wp, float hs) {
+  float a = uChop * uSwell * hs;
+  return a * (SA0 * normalize(SK0) * cos(sph(wp, SK0, SW0, 0.0)) + SA1 * normalize(SK1) * cos(sph(wp, SK1, SW1, 1.3))
+            + SA2 * normalize(SK2) * cos(sph(wp, SK2, SW2, 2.1)) + SA3 * normalize(SK3) * cos(sph(wp, SK3, SW3, 0.7)));
+}
+// Jacobian determinant of x -> x + D(x): < 0 means the crest has folded over (curl).
+float swellJ(vec2 wp, float hs) {
+  float a = uChop * uSwell * hs;
+  mat2 M = mat2(1.0);
+  M -= a * SA0 * sin(sph(wp, SK0, SW0, 0.0)) * outerProduct(normalize(SK0), SK0);
+  M -= a * SA1 * sin(sph(wp, SK1, SW1, 1.3)) * outerProduct(normalize(SK1), SK1);
+  M -= a * SA2 * sin(sph(wp, SK2, SW2, 2.1)) * outerProduct(normalize(SK2), SK2);
+  M -= a * SA3 * sin(sph(wp, SK3, SW3, 0.7)) * outerProduct(normalize(SK3), SK3);
+  return determinant(M);
 }
 vec2 worldXY(vec2 uv, float aspect) { return vec2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0); }
 `;
@@ -269,12 +287,12 @@ void main() {
   if (seed == 0.0) seed = hash(vUv * 17.0 + 0.3);
   if (a.w > 0.0) {
     vec3 vel = b.xyz;
-    vel.z -= 0.0035 * uDt;
+    vel.z -= 0.005 * uDt;
     vel *= pow(0.985, uDt);
     vec3 pos = a.xyz + vel * uDt;
-    float life = a.w - uDt / 70.0;
+    float life = a.w - uDt / 50.0;
     vec2 uv = toUv(pos.xy);
-    float water = (texture(uField, uv).x + swellH(pos.xy)) * uHeightScale;
+    float water = (texture(uField, uv).x + swellH(pos.xy - swellD(pos.xy, uHeightScale))) * uHeightScale;
     if (pos.z < water - 0.01 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) life = 0.0;
     oA = vec4(pos, life);
     oB = vec4(vel, seed);
@@ -301,10 +319,12 @@ void main() {
     uv = vec2(r1, hash(vec2(r1 * 5.3, seed + uTime)));
   }
   vec3 fld = texture(uField, uv).xyz;
-  float splash = fld.z;
+  vec2 wp0 = worldXY(uv, uAspect);
+  float fold = max(0.35 - swellJ(wp0, uHeightScale), 0.0);
+  float splash = fld.z + fold * 0.25;
   if (splash > r2 * 0.03) {
-    vec2 wp = worldXY(uv, uAspect);
-    vec3 pos = vec3(wp, (fld.x + swellH(wp)) * uHeightScale + 0.015);
+    vec2 wp = wp0;
+    vec3 pos = vec3(wp + swellD(wp, uHeightScale), (fld.x + swellH(wp)) * uHeightScale + 0.015);
     // Throw downhill off the crest (surface gradient) and with the current.
     vec2 hx = vec2(texture(uField, uv + vec2(0.002, 0.0)).x - texture(uField, uv - vec2(0.002, 0.0)).x,
                    texture(uField, uv + vec2(0.0, 0.002)).x - texture(uField, uv - vec2(0.0, 0.002)).x);
@@ -356,15 +376,36 @@ precision highp sampler2D;
 in vec2 aUv;
 uniform sampler2D uHeight;
 uniform mat4 uVP;
+uniform vec2 uTexel;
 uniform float uAspect;
 uniform float uHeightScale;
 ${SWELL_GLSL}
 out vec2 vUv;
 out vec3 vPos;
+out vec3 vN;
+out float vFold;
+// Surface point for a grid uv: simulated height (with choppy displacement along its gradient)
+// plus the Gerstner swell.
+vec3 surf(vec2 uv) {
+  vec2 wp = worldXY(uv, uAspect);
+  float h = texture(uHeight, uv).x;
+  float hL = texture(uHeight, uv - vec2(uTexel.x, 0.0)).x;
+  float hR = texture(uHeight, uv + vec2(uTexel.x, 0.0)).x;
+  float hB = texture(uHeight, uv - vec2(0.0, uTexel.y)).x;
+  float hT = texture(uHeight, uv + vec2(0.0, uTexel.y)).x;
+  vec2 grad = vec2((hR - hL) / (2.0 * uTexel.x * 2.0 * uAspect), (hT - hB) / (2.0 * uTexel.y * 2.0)) * uHeightScale;
+  vec2 d = -uChop * 0.016 * grad + swellD(wp, uHeightScale);
+  return vec3(wp + d, (h + swellH(wp)) * uHeightScale);
+}
 void main() {
-  vec2 wp = worldXY(aUv, uAspect);
-  float h = texture(uHeight, aUv).x + swellH(wp);
-  vec3 p = vec3(wp, h * uHeightScale);
+  vec3 p = surf(aUv);
+  vec2 e = uTexel * 1.5;
+  vec3 px = surf(aUv + vec2(e.x, 0.0)) - surf(aUv - vec2(e.x, 0.0));
+  vec3 py = surf(aUv + vec2(0.0, e.y)) - surf(aUv - vec2(0.0, e.y));
+  vN = normalize(cross(px, py));
+  // Area ratio of the displaced patch vs. the flat one: near zero or negative = folding crest.
+  float J = (px.x * py.y - px.y * py.x) / (2.0 * e.x * 2.0 * uAspect * 2.0 * e.y * 2.0);
+  vFold = 1.0 - smoothstep(0.15, 0.6, J);
   vUv = aUv;
   vPos = p;
   gl_Position = uVP * vec4(p, 1.0);
@@ -375,6 +416,8 @@ precision highp float;
 precision highp sampler2D;
 in vec2 vUv;
 in vec3 vPos;
+in vec3 vN;
+in float vFold;
 out vec4 frag;
 uniform sampler2D uHeight;
 uniform sampler2D uVelocity;
@@ -395,14 +438,8 @@ vec3 sky(vec3 d) {
 }
 
 void main() {
-  float hL = texture(uHeight, vUv - vec2(uTexel.x, 0.0)).x;
-  float hR = texture(uHeight, vUv + vec2(uTexel.x, 0.0)).x;
-  float hB = texture(uHeight, vUv - vec2(0.0, uTexel.y)).x;
-  float hT = texture(uHeight, vUv + vec2(0.0, uTexel.y)).x;
-  float dx = 2.0 * uAspect * uTexel.x;
-  float dy = 2.0 * uTexel.y;
-  vec2 sg = swellG(vPos.xy);
-  vec3 n = normalize(vec3(-((hR - hL) / (2.0 * dx) + sg.x) * uHeightScale, -((hT - hB) / (2.0 * dy) + sg.y) * uHeightScale, 1.0));
+  vec3 n = normalize(vN);
+  if (n.z < 0.0) n = -n;
 
   vec3 V = normalize(uEye - vPos);
   vec3 Rv = reflect(-V, n);
@@ -419,9 +456,12 @@ void main() {
   vec3 floorCol = vec3(0.08, 0.32, 0.46) + tile * 0.05;
   float outside = step(0.0, -fuv.x) + step(1.0, fuv.x) + step(0.0, -fuv.y) + step(1.0, fuv.y);
   floorCol = mix(floorCol, vec3(0.05, 0.12, 0.2), clamp(outside, 0.0, 1.0));
-  float absorb = exp(-length(Rf * t) * 1.6);
-  vec3 water = vec3(0.01, 0.12, 0.24);
+  float absorb = exp(-length(Rf * t) * 1.3);
+  vec3 water = vec3(0.03, 0.22, 0.38);
   vec3 refr = mix(water, floorCol, absorb);
+  // Light scattering through thin, high crests: a green-blue glow proportional to height.
+  float crest = clamp(vPos.z * 2.5, 0.0, 1.0);
+  refr += vec3(0.05, 0.35, 0.40) * crest * (0.4 + 0.6 * max(dot(n, normalize(vec3(0.4, 0.6, 0.7))), 0.0));
 
   vec3 col = mix(refr, sky(Rv), fresnel);
   vec3 sun = normalize(vec3(0.4, 0.6, 0.7));
@@ -430,7 +470,7 @@ void main() {
   float speed = length(texture(uVelocity, vUv).xy);
   col += vec3(0.15, 0.2, 0.2) * min(speed * 0.05, 0.4);
   // Foam on breaking crests.
-  float foam = clamp(texture(uHeight, vUv).z * 12.0, 0.0, 1.0);
+  float foam = clamp(texture(uHeight, vUv).z * 12.0 + vFold, 0.0, 1.0);
   float fn = fract(sin(dot(floor(vUv * 900.0), vec2(12.9898, 78.233))) * 43758.5453);
   col = mix(col, vec3(0.92, 0.96, 1.0), foam * (0.55 + 0.45 * fn));
   frag = vec4(col, 1.0);
@@ -478,7 +518,7 @@ out vec3 vWorld;
 vec3 world(vec2 uv) {
   vec2 wp = worldXY(uv, uAspect);
   float h = texture(uHeight, uv).x + swellH(wp);
-  return vec3(wp, h * uHeightScale);
+  return vec3(wp + swellD(wp, uHeightScale), h * uHeightScale);
 }
 void main() {
   vec4 s = texelFetch(uState, ivec2(0), 0);
@@ -586,6 +626,7 @@ out vec3 vWorld;
 void main() {
   vec2 wp = worldXY(uPoint, uAspect);
   float h = (texture(uHeight, uPoint).x + swellH(wp)) * uHeightScale;
+  wp += swellD(wp, uHeightScale);
   vec3 fwd = vec3(uDir, 0.0);
   vec3 rgt = vec3(-uDir.y, uDir.x, 0.0);
   vec3 p = vec3(wp, h) + (aPos.x * fwd + aPos.y * rgt + vec3(0.0, 0.0, aPos.z)) * uScale;

@@ -77,7 +77,7 @@ class Program {
     }
   }
   use() { G.useProgram(this.prog); return this; }
-  f(name: string, v: number) { G.uniform1f(this.uniforms.get(name)!, v); return this; }
+  f(name: string, v: number) { const u = this.uniforms.get(name); if (u) G.uniform1f(u, v); return this; }
   v2(name: string, x: number, y: number) { G.uniform2f(this.uniforms.get(name)!, x, y); return this; }
   v3(name: string, x: number, y: number, z: number) { G.uniform3f(this.uniforms.get(name)!, x, y, z); return this; }
   m4(name: string, m: Mat4) { G.uniformMatrix4fv(this.uniforms.get(name)!, false, m); return this; }
@@ -351,6 +351,7 @@ const splatSlider = $<HTMLInputElement>('splat');
 const heightSlider = $<HTMLInputElement>('height');
 const speedSlider = $<HTMLInputElement>('speed');
 const swellSlider = $<HTMLInputElement>('swell');
+const curlSlider = $<HTMLInputElement>('curl');
 const speedOut = $<HTMLOutputElement>('speedOut');
 const boatBtn = $<HTMLButtonElement>('boat');
 let showBoat = true;
@@ -632,7 +633,7 @@ function step(dt0: number) {
   pWave.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', wdt).f('uC2', c2).f('uDamp', wd)
     .f('uAspect', aspect).f('uBoatSize', showBoat ? BOAT_SCALE * 0.25 : 0.0001)
     .f('uDraft', BOAT_SCALE * BOAT_DRAFT / heightScale)
-    .f('uSwell', swellAmp()).f('uSimTime', simTime)
+    .f('uSwell', swellAmp()).f('uSimTime', simTime).f('uChop', chop())
     .tex('uBoat', boatState.read.attach(1));
   for (let i = 0; i < subs; i++) {
     pWave.tex('uField', wave.read.attach(0));
@@ -642,7 +643,7 @@ function step(dt0: number) {
   // 11 (3D). Spray particles thrown off the hull.
   pPartUpdate.use().f('uDt', dt0).f('uTime', (performance.now() % 100000) / 1000).f('uAspect', aspect)
     .f('uHeightScale', heightScale).f('uBoatSize', BOAT_SCALE * 0.25).f('uSpawnRate', showBoat ? 1 : 0)
-    .v2('uSimTexel', tx, ty).f('uSwell', swellAmp()).f('uSimTime', simTime)
+    .v2('uSimTexel', tx, ty).f('uSwell', swellAmp()).f('uSimTime', simTime).f('uChop', chop())
     .tex('uA', partRead.a.attach(0)).tex('uB', partRead.b.attach(1))
     .tex('uField', wave.read.attach(2)).tex('uBoat', boatState.read.attach(3))
     .tex('uVelocity', velocity.read.attach(4));
@@ -656,7 +657,7 @@ function step(dt0: number) {
 function drawBoat(vp: Mat4, eye: [number, number, number], heightScale: number) {
   if (!showBoat) return;
   pBoat.use().m4('uVP', vp).v2('uTexel', 1 / dyeW, 1 / dyeH).f('uAspect', aspect).f('uHeightScale', heightScale)
-    .f('uScale', BOAT_SCALE).v3('uEye', eye[0], eye[1], eye[2]).f('uSwell', view3D ? swellAmp() : 0).f('uSimTime', simTime)
+    .f('uScale', BOAT_SCALE).v3('uEye', eye[0], eye[1], eye[2]).f('uSwell', view3D ? swellAmp() : 0).f('uSimTime', simTime).f('uChop', chop())
     .tex('uState', boatState.read.attach(0)).tex('uHeight', wave.read.attach(1));
   G.bindVertexArray(boatVao);
   G.drawArrays(G.TRIANGLES, 0, boatVertCount);
@@ -667,7 +668,7 @@ function drawTool(vp: Mat4, eye: [number, number, number], heightScale: number) 
   if (!shovelPose.active) return;
   pTool.use().m4('uVP', vp).v2('uPoint', shovelPose.x, shovelPose.y).v2('uDir', shovelPose.dx, shovelPose.dy)
     .f('uAspect', aspect).f('uHeightScale', heightScale).f('uScale', 0.07 + (Number(splatSlider.value) / 100) * 0.3)
-    .v3('uEye', eye[0], eye[1], eye[2]).f('uSwell', view3D ? swellAmp() : 0).f('uSimTime', simTime)
+    .v3('uEye', eye[0], eye[1], eye[2]).f('uSwell', view3D ? swellAmp() : 0).f('uSimTime', simTime).f('uChop', chop())
     .tex('uHeight', (view3D ? wave : dye).read.attach(0));
   G.bindVertexArray(toolVao);
   G.drawArrays(G.TRIANGLES, 0, toolVertCount);
@@ -687,7 +688,8 @@ function render2D(t: number) {
 }
 
 function currentHeightScale() { return 0.06 + (Number(heightSlider.value) / 100) * 0.5; }
-function swellAmp() { return Number(swellSlider.value) / 100 * 0.3; } // height units at full slider
+function swellAmp() { return Number(swellSlider.value) / 100 * 0.5; } // height units at full slider
+function chop() { return Number(curlSlider.value) / 100 * 2.6; }
 let simTime = 0;
 
 function drawSpray(vp: Mat4) {
@@ -711,7 +713,7 @@ function render3D() {
   G.clearColor(0.03, 0.07, 0.12, 1);
   G.enable(G.DEPTH_TEST);
   G.clear(G.COLOR_BUFFER_BIT | G.DEPTH_BUFFER_BIT);
-  pMesh.use().m4('uVP', viewProj()).f('uAspect', aspect).f('uHeightScale', heightScale).f('uSwell', swellAmp()).f('uSimTime', simTime)
+  pMesh.use().m4('uVP', viewProj()).f('uAspect', aspect).f('uHeightScale', heightScale).f('uSwell', swellAmp()).f('uSimTime', simTime).f('uChop', chop())
     .v2('uTexel', 1 / dyeW, 1 / dyeH).v3('uEye', eye[0], eye[1], eye[2])
     .tex('uHeight', wave.read.attach(0)).tex('uVelocity', velocity.read.attach(1));
   G.bindVertexArray(meshVao);
