@@ -4,7 +4,7 @@ A two-player pirate game in TypeScript and raw WebGL2. Crew a 40 m ship with thr
 cannons and a bow harpoon. Sail out of a sheltered bay, through a gate of sea stacks and under a
 rock arch, into a storm where the swell reaches 20 m and sea serpents hunt.
 
-Live: https://pikos.org/onni/water/ · The original 2D fluid simulator: https://pikos.org/juha/water/
+Live: https://onnin.no (also https://pikos.org/onni/water/) · The original 2D fluid simulator: https://pikos.org/juha/water/
 
 ## Play
 
