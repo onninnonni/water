@@ -3,10 +3,10 @@
 import { stormAt, bayAt, smoothstep, WIND_DIR } from './world';
 
 export const NW = 12;
-const LAMBDA = [220, 160, 118, 92, 70, 52, 38, 27, 19, 13, 9, 6];
-const STEEP = [0.068, 0.072, 0.078, 0.08, 0.08, 0.082, 0.075, 0.072, 0.07, 0.068, 0.064, 0.06];
-const SPREAD = [0, 14, -19, 28, -33, 9, -12, 42, -47, 24, -27, 58];
-const QTOT = 0.72;
+const LAMBDA = [300, 220, 160, 118, 92, 70, 52, 38, 27, 19, 13, 9];
+const STEEP = [0.06, 0.068, 0.072, 0.078, 0.08, 0.08, 0.082, 0.075, 0.072, 0.07, 0.068, 0.064];
+const SPREAD = [0, 10, 18, -20, 30, -35, 9, -12, 42, -47, 24, -27];
+const QTOT = 0.55;
 
 export interface Wave { dx: number; dy: number; k: number; A: number; Q: number; w: number; phase: number; swell: number; L: number; }
 let seed = 1234567;
@@ -34,7 +34,7 @@ export function updatePhases(t: number) {
 // Amplitude multipliers for long swell and short chop at a rest position.
 export function ampMuls(x: number, y: number): [number, number] {
   const s = stormAt(x, y), bay = bayAt(x, y);
-  return [0.04 + 0.96 * s, (0.22 + 0.78 * s) * (1 - 0.55 * bay)];
+  return [0.04 + 1.6 * s, (0.22 + 0.78 * s) * (1 - 0.55 * bay)];
 }
 
 export interface WSample { dx: number; dy: number; z: number; vx: number; vy: number; vz: number; }

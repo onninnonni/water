@@ -1,0 +1,6 @@
+[Unit]
+Description=Ensure the Seven Seas and juha/water routes exist in Caddy
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh %h/seas-relay/routes.sh

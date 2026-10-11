@@ -1,0 +1,9 @@
+[Unit]
+Description=Re-apply the Seven Seas routes after Caddy reloads
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

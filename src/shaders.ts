@@ -113,7 +113,7 @@ void main(){
   vec2 p0 = uCenter + aGrid.xy;
   float sp = aGrid.z;
   float s = stormAt(p0), bay = bayAt(p0);
-  float ml = 0.04 + 0.96*s, ms = (0.22 + 0.78*s)*(1.0 - 0.55*bay);
+  float ml = 0.04 + 1.6*s, ms = (0.22 + 0.78*s)*(1.0 - 0.55*bay);
   vec3 D = vec3(0.0); vec3 N = vec3(0.0, 0.0, 1.0); float crest = 0.0;
   for (int i = 0; i < NW; i++){
     vec4 A = uWA[i], B = uWB[i];

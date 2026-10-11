@@ -6,19 +6,19 @@
   <meta name="theme-color" content="#0b1116" />
   <title>Seven Seas</title>
   <style>
-    :root { --fg: #e4ebf0; --dim: rgba(228, 235, 240, 0.62); --amber: #e9b44c; }
+    :root { --fg: #e4ebf0; --dim: rgba(228, 235, 240, 0.62); --amber: #e9b44c; --red: #e0624a; }
     html, body { margin: 0; height: 100%; background: #0b1116; color: var(--fg); overflow: hidden;
       font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
       user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; overscroll-behavior: none; }
-    #c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
-    #c:active { cursor: grabbing; }
+    #c { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
     #vignette { position: fixed; inset: 0; pointer-events: none;
       background: radial-gradient(ellipse at center, rgba(0,0,0,0) 52%, rgba(0,0,0,0.5) 100%); }
+    button { font: inherit; color: var(--fg); cursor: pointer; }
 
     #hud { position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity 1.5s 0.6s; }
     body.playing #hud { opacity: 1; }
     #compass { position: absolute; top: calc(10px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
-      width: min(440px, 64vw); height: 34px; }
+      width: min(440px, 60vw); height: 34px; }
     #minimap { position: absolute; left: calc(14px + env(safe-area-inset-left)); bottom: calc(14px + env(safe-area-inset-bottom));
       width: 150px; height: 150px; }
     #gauges { position: absolute; right: calc(16px + env(safe-area-inset-right)); bottom: calc(16px + env(safe-area-inset-bottom));
@@ -26,58 +26,88 @@
     #speedbox { text-align: right; }
     #knots { font-size: 46px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
     .lbl { font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--dim); }
-    #sea { font-size: 12px; margin-top: 8px; color: var(--dim); font-variant-numeric: tabular-nums; }
+    #sea { font-size: 12px; margin-top: 8px; color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
     #sea b { color: var(--fg); font-weight: 600; }
+    #hullbar { width: 140px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.14); margin: 8px 0 0 auto; overflow: hidden; }
+    #hullfill { height: 100%; background: #7fc7a0; width: 100%; transition: width 0.3s, background 0.3s; }
+    #kills { font-size: 12px; color: var(--dim); margin-top: 6px; }
     #controls { display: flex; flex-direction: column; align-items: center; gap: 8px; }
     #lever { width: 12px; height: 108px; border-radius: 6px; background: rgba(255,255,255,0.12); position: relative; overflow: hidden;
       box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset; }
-    #leverFill { position: absolute; left: 0; right: 0; background: var(--amber); }
-    #leverZero { position: absolute; left: 0; right: 0; height: 2px; background: rgba(255,255,255,0.75); }
+    #leverFill { position: absolute; left: 0; right: 0; bottom: 0; background: var(--amber); }
     #rudder { width: 64px; height: 8px; border-radius: 4px; background: rgba(255,255,255,0.12); position: relative; }
     #rudderNeedle { position: absolute; top: -3px; width: 4px; height: 14px; border-radius: 2px; background: var(--fg); margin-left: -2px; }
 
+    #crew { position: absolute; top: calc(12px + env(safe-area-inset-top)); left: calc(12px + env(safe-area-inset-left));
+      font-size: 12px; line-height: 1.6; text-shadow: 0 1px 6px rgba(0,0,0,0.9); pointer-events: auto; max-width: 42vw; }
+    #crew .who { display: flex; align-items: center; gap: 6px; }
+    #crew .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+    #crew .role { color: var(--dim); }
+    #invite { margin-top: 6px; background: rgba(8,14,20,0.55); border: 1px solid rgba(255,255,255,0.18); border-radius: 8px; padding: 5px 9px; font-size: 12px; }
     #buttons { position: absolute; top: calc(10px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right));
       display: flex; gap: 6px; pointer-events: auto; }
-    #buttons button { background: rgba(8, 14, 20, 0.5); color: var(--fg); border: 1px solid rgba(255,255,255,0.16);
-      border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer; backdrop-filter: blur(6px); }
-    #buttons button:hover { background: rgba(30, 45, 60, 0.7); }
-
+    #buttons button, .tbtn { background: rgba(8, 14, 20, 0.5); border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 8px; padding: 6px 10px; font-size: 12px; backdrop-filter: blur(6px); }
+    #prompt { position: absolute; bottom: 24%; left: 50%; transform: translateX(-50%); font-size: 15px; white-space: nowrap;
+      text-shadow: 0 2px 10px rgba(0,0,0,0.95); opacity: 0; transition: opacity 0.2s; }
+    #prompt.show { opacity: 1; }
+    #prompt kbd, #start kbd { display: inline-block; min-width: 18px; padding: 1px 6px; border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 5px; font: inherit; font-size: 12px; color: var(--fg); text-align: center; }
+    #cross { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%;
+      background: rgba(255,255,255,0.7); box-shadow: 0 0 4px rgba(0,0,0,0.8); display: none; }
+    body.fp #cross { display: block; }
     #toast { position: absolute; top: 20%; left: 50%; transform: translateX(-50%); font-size: clamp(15px, 2.6vw, 22px);
       letter-spacing: 0.32em; text-transform: uppercase; opacity: 0; transition: opacity 0.9s; white-space: nowrap;
       text-shadow: 0 2px 14px rgba(0,0,0,0.9); padding-left: 0.32em; }
     #toast.show { opacity: 1; }
-    #touchhint { position: absolute; inset: 0; display: none; opacity: 0; transition: opacity 1s; }
-    body.touch #touchhint { display: flex; }
-    body.touch.hint #touchhint { opacity: 1; }
-    #touchhint div { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 12px;
-      letter-spacing: 0.25em; text-transform: uppercase; color: var(--dim); }
-    #touchhint div + div { border-left: 1px dashed rgba(255,255,255,0.2); }
+    .tag { position: absolute; transform: translate(-50%, -100%); font-size: 12px; font-weight: 600; white-space: nowrap;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.95); pointer-events: none; }
+    #touchui { display: none; }
+    body.touch.playing #touchui { display: block; }
+    #stick { position: absolute; width: 110px; height: 110px; margin: -55px 0 0 -55px; border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.05); display: none; }
+    #knob { position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%; background: rgba(255,255,255,0.3); }
+    #tbtns { position: absolute; right: calc(16px + env(safe-area-inset-right)); bottom: calc(170px + env(safe-area-inset-bottom));
+      display: flex; flex-direction: column; gap: 10px; pointer-events: auto; align-items: flex-end; }
+    #tbtns button { min-width: 64px; padding: 12px 14px; font-size: 13px; border-radius: 14px; }
+    #fireT { background: rgba(224, 98, 74, 0.35) !important; display: none; }
+    #actT { display: none; }
 
     #start { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-      gap: 14px; padding: 24px; text-align: center; transition: opacity 1.6s;
-      background: radial-gradient(ellipse at center, rgba(5,9,13,0.15), rgba(5,9,13,0.8)); }
+      gap: 14px; padding: 24px; text-align: center; transition: opacity 1.6s; overflow-y: auto;
+      background: radial-gradient(ellipse at center, rgba(5,9,13,0.25), rgba(5,9,13,0.85)); }
     body.playing #start { opacity: 0; pointer-events: none; }
-    #start h1 { font-size: clamp(42px, 10vw, 96px); letter-spacing: 0.4em; margin: 0; font-weight: 200; padding-left: 0.4em;
+    #start h1 { font-size: clamp(40px, 10vw, 92px); letter-spacing: 0.4em; margin: 0; font-weight: 200; padding-left: 0.4em;
       text-shadow: 0 4px 30px rgba(0,0,0,0.7); }
-    #start p { margin: 0; color: var(--dim); max-width: 520px; }
-    #start .keys { font-size: 13px; color: var(--dim); line-height: 1.9; }
-    #start kbd { display: inline-block; min-width: 18px; padding: 1px 6px; border: 1px solid rgba(255,255,255,0.25);
-      border-radius: 5px; font: inherit; font-size: 12px; color: var(--fg); }
-    #go { margin-top: 10px; background: rgba(233, 180, 76, 0.16); color: var(--fg); border: 1px solid var(--amber);
-      border-radius: 999px; padding: 12px 34px; font: inherit; font-size: 15px; letter-spacing: 0.25em; text-transform: uppercase;
-      cursor: pointer; padding-left: calc(34px + 0.25em); }
-    #go:hover { background: rgba(233, 180, 76, 0.3); }
+    #start p { margin: 0; color: var(--dim); max-width: 540px; }
+    .row { display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; }
+    #name { background: rgba(8,14,20,0.6); border: 1px solid rgba(255,255,255,0.2); border-radius: 999px; color: var(--fg);
+      font: inherit; padding: 9px 16px; text-align: center; width: 200px; }
+    .seg button { background: rgba(8,14,20,0.5); border: 1px solid rgba(255,255,255,0.2); padding: 9px 16px; border-radius: 999px; }
+    .seg button.on { border-color: var(--amber); background: rgba(233,180,76,0.18); }
+    .go { background: rgba(233, 180, 76, 0.16); border: 1px solid var(--amber); border-radius: 999px; padding: 12px 26px;
+      font-size: 14px; letter-spacing: 0.2em; text-transform: uppercase; }
+    .go:hover { background: rgba(233, 180, 76, 0.3); }
+    .go.alt { border-color: rgba(255,255,255,0.35); background: rgba(8,14,20,0.5); }
+    #start .keys { font-size: 13px; color: var(--dim); line-height: 1.9; max-width: 620px; }
+    #joinbox { display: none; }
+    body.joining #joinbox { display: flex; }
+    body.joining #hostbox, body.joining #spawnrow { display: none; }
+    #status { min-height: 1.4em; color: var(--amber); font-size: 13px; }
     .touchonly { display: none; }
     body.touch .touchonly { display: block; }
     body.touch .desktoponly { display: none; }
-    #sea { white-space: nowrap; }
+    #wreck { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 10px;
+      background: rgba(3,6,9,0.75); opacity: 0; pointer-events: none; transition: opacity 1.2s; letter-spacing: 0.3em; text-transform: uppercase; }
+    body.wrecked #wreck { opacity: 1; }
+    #err { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px; text-align: center; }
     @media (max-width: 560px) {
       #compass { top: calc(52px + env(safe-area-inset-top)); width: 86vw; }
       #minimap { width: 112px; height: 112px; }
       #knots { font-size: 38px; }
       #sea { font-size: 11px; }
+      #crew { top: calc(96px + env(safe-area-inset-top)); }
     }
-    #err { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px; text-align: center; }
   </style>
 </head>
 <body>
@@ -87,36 +117,63 @@
   <div id="hud">
     <canvas id="compass"></canvas>
     <canvas id="minimap"></canvas>
+    <div id="crew"></div>
+    <div id="cross"></div>
+    <div id="tags"></div>
     <div id="gauges">
       <div id="speedbox">
         <div id="knots">0</div>
         <div class="lbl">knots</div>
         <div id="sea"></div>
+        <div id="hullbar"><div id="hullfill"></div></div>
+        <div id="kills"></div>
       </div>
       <div id="controls">
-        <div id="lever"><div id="leverFill"></div><div id="leverZero"></div></div>
+        <div id="lever" title="Sails"><div id="leverFill"></div></div>
         <div id="rudder"><div id="rudderNeedle"></div></div>
       </div>
     </div>
     <div id="buttons">
-      <button id="camBtn" title="Switch camera (C)">Chase cam</button>
+      <button id="camBtn" title="Switch camera (C)">Camera</button>
       <button id="muteBtn" title="Sound on/off (M)">Mute</button>
       <button id="fsBtn" title="Fullscreen">⛶</button>
     </div>
+    <div id="prompt"></div>
     <div id="toast"></div>
-    <div id="touchhint"><div>drag ⟷ steer</div><div>drag ↕ throttle</div></div>
+    <div id="touchui">
+      <div id="stick"><div id="knob"></div></div>
+      <div id="tbtns">
+        <button id="fireT" class="tbtn">Fire</button>
+        <button id="actT" class="tbtn">Use</button>
+        <button id="waveT" class="tbtn">Wave</button>
+      </div>
+    </div>
   </div>
 
   <div id="start">
     <h1>SEVEN SEAS</h1>
-    <p>A storm is building beyond the stacks. The bay is calm. The open sea is not.</p>
-    <div class="keys desktoponly">
-      <kbd>W</kbd> <kbd>S</kbd> throttle lever &nbsp;·&nbsp; <kbd>A</kbd> <kbd>D</kbd> helm &nbsp;·&nbsp; <kbd>X</kbd> all stop<br />
-      <kbd>C</kbd> camera &nbsp;·&nbsp; drag to look around &nbsp;·&nbsp; <kbd>M</kbd> sound
+    <p>A pirate ship, a crew of two, and serpents in the storm beyond the stacks.</p>
+    <div class="row"><input id="name" maxlength="18" placeholder="Your pirate name" /></div>
+    <div class="row seg" id="spawnrow">
+      <button id="spShelter" class="on">Sheltered bay</button>
+      <button id="spStorm">Heart of the storm</button>
     </div>
-    <div class="keys touchonly">Left side: drag to steer · Right side: drag up and down to set the throttle</div>
-    <button id="go">Cast off</button>
+    <div class="row" id="hostbox">
+      <button class="go" id="soloBtn">Sail solo</button>
+      <button class="go alt" id="hostBtn">Sail with a mate</button>
+    </div>
+    <div class="row" id="joinbox">
+      <button class="go" id="joinBtn">Join the crew</button>
+      <button class="go alt" id="leaveJoin">Sail my own ship</button>
+    </div>
+    <div id="status"></div>
+    <div class="keys desktoponly">
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> walk · mouse to look · <kbd>E</kbd> take the wheel or the harpoon · click or <kbd>Space</kbd> fire a cannon<br />
+      At the wheel: <kbd>W</kbd>/<kbd>S</kbd> set sail, <kbd>A</kbd>/<kbd>D</kbd> steer · <kbd>C</kbd> camera · <kbd>Q</kbd> wave · <kbd>M</kbd> sound
+    </div>
+    <div class="keys touchonly">Left thumb: move or steer · Right thumb: look · Buttons for using the wheel, harpoon and cannons</div>
   </div>
+  <div id="wreck"><div style="font-size:22px">The sea took her</div><div style="font-size:12px;color:var(--dim)">Back to the bay…</div></div>
   <div id="err"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>

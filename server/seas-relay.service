@@ -1,0 +1,11 @@
+[Unit]
+Description=Seven Seas crew WebSocket relay
+
+[Service]
+ExecStart=/usr/bin/node %h/seas-relay/relay.js
+Restart=always
+RestartSec=2
+Environment=PORT=8798
+
+[Install]
+WantedBy=default.target

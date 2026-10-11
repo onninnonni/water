@@ -1,32 +1,35 @@
 # Seven Seas
 
-A storm-sailing game in TypeScript and raw WebGL2. Take a 14 m trawler out of a sheltered bay,
-through a gate of sea stacks and under a rock arch, into an open ocean where the swell builds to
-10 m seas, the rain thickens and lightning walks the horizon.
+A two-player pirate game in TypeScript and raw WebGL2. Crew a 40 m ship with three masts, six
+cannons and a bow harpoon. Sail out of a sheltered bay, through a gate of sea stacks and under a
+rock arch, into a storm where the swell reaches 20 m and sea serpents hunt.
 
-Live: https://pikos.org/onni/water/
+Live: https://pikos.org/onni/water/ · The original 2D fluid simulator: https://pikos.org/juha/water/
 
-## Controls
+## Play
 
-- **Desktop:** `W`/`S` move the throttle lever (it stays where you leave it), `A`/`D` steer,
-  `X` all stop, `C` switches between the bridge and a chase camera, drag to look around, `M` mutes.
-- **Touch:** drag sideways on the left half to steer, drag up and down on the right half to set the throttle.
+- **Start:** choose a name and spawn in the sheltered bay or the heart of the storm. *Sail solo*, or
+  *Sail with a mate* to get an invite link; your mate opens it and joins your ship.
+- **On deck:** `WASD` walk, mouse to look (click to capture it), `Shift` run, `C` first/third person,
+  `Q` wave. Stand at a cannon and click or press `Space` to fire it.
+- **The wheel:** walk to it on the quarterdeck and press `E`. `W`/`S` set or furl sail, `A`/`D` steer,
+  `C` switches between your own view and an overview of the ship. Only one player holds the wheel;
+  with nobody at it the ship drifts with the sea.
+- **The harpoon:** press `E` at the bow ballista, aim with the mouse, click to fire.
+- **Touch:** left thumb moves or steers, right thumb looks, buttons for the wheel, harpoon and cannons.
 
 ## How it works
 
-- **Sea:** 12 deep-water Gerstner waves (dispersion ω = √(g·k)), 6 m to 220 m long. Long swell
-  scales from almost nothing near the island to full storm 3 km out; short chop stays a little
-  everywhere. The same wave function runs in the vertex shader and on the CPU, so the hull floats
-  on exactly what you see.
-- **Boat:** buoyancy springs on heave, pitch and roll from five hull samples; the hull is dragged by
-  the water's orbital currents and a downwind drift, slides down wave faces, slams into crests,
-  and collides with rocks.
-- **World:** procedural crescent island with cliffs, beaches, six sea stacks and an arch, a lighthouse
-  with a rotating beam, and channel and storm buoys. The ocean is a camera-centred polar grid out to 7 km.
-- **Atmosphere:** storm intensity follows distance from the island and drives fog, cloud cover,
-  low scud, rain, wind, whitecaps and lightning frequency.
-- **Sound:** all procedural Web Audio: dark ambient pads and drone, sonar pings, ocean rumble, hull
-  wash, wind, rain, diesel, bow slaps, creaks and distance-delayed thunder.
+- **Sea:** 12 deep-water Gerstner waves (ω = √(g·k)), 9 m to 300 m long, shared by the vertex shader
+  and the CPU so the ship floats on exactly what you see. Calm near the island, 20 m seas 3 km out.
+- **Ship:** buoyancy springs on heave, pitch and roll; carried by orbital currents and downwind
+  drift; slides down wave faces; sails drive best with the wind behind; slams, green water, rocks.
+- **Serpents:** host-simulated heads with bodies laid along their trail, arching through the swell;
+  they circle, rear and ram. Cannonballs skip off the water and the guns time the roll.
+- **Crew:** the first player is host and runs the simulation; others send inputs and avatar state.
+  Messages go through a small WebSocket relay on pikos.org (`/onni/seas/ws/<room>`).
+- **Sound:** procedural Web Audio: dark pads, deep horn-choir moans in the storm, irregular hull
+  knocks and timber groans, wind, rain, cannons, serpent roars and distance-delayed thunder.
 
 ```bash
 npm install

@@ -51,7 +51,7 @@ const PR = 545;
 export const PILLARS: Pillar[] = [
   [-113, 40, 13], [-103, 60, 15], [-94, 72, 16], [-86, 68, 15], [-77, 52, 14], [-67, 38, 12],
 ].map(([a, h, r]) => ({ x: IC.x + PR * Math.cos(a * Math.PI / 180), y: IC.y + PR * Math.sin(a * Math.PI / 180), r, h }));
-export const ARCH = { a: 2, b: 3, z0: 30, rise: 9, thick: 6.5 };
+export const ARCH = { a: 2, b: 3, z0: 50, rise: 10, thick: 6.5 };
 
 const LH_ANG = -42 * Math.PI / 180;
 export const LIGHTHOUSE = (() => {
