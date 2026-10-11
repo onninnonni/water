@@ -615,28 +615,4 @@ void main() {
   frag = t;
 }`;
 
-// Ball mesh placed on the sea at the pointer.
-export const VERT_BALL = `#version 300 es
-precision highp float;
-precision highp sampler2D;
-in vec3 aPos;
-in vec3 aCol;
-uniform sampler2D uHeight;
-uniform mat4 uVP;
-uniform vec2 uPoint;
-uniform float uAspect;
-uniform float uHeightScale;
-uniform float uScale;    // ball radius, world units
-uniform float uSink;     // centre height below the water level, world units
-${SWELL_GLSL}
-out vec3 vCol;
-out vec3 vWorld;
-void main() {
-  vec2 wp = worldXY(uPoint, uAspect);
-  float lvl = swellH(wp) * uHeightScale;
-  wp += swellD(wp, uHeightScale);
-  vec3 p = vec3(wp, lvl - uSink) + aPos * uScale;
-  vCol = aCol;
-  vWorld = p;
-  gl_Position = uVP * vec4(p, 1.0);
-}`;
+

@@ -1,7 +1,7 @@
 import {
   VERT, ADVECT, SPLAT, DIVERGENCE, JACOBI, GRADIENT_SUBTRACT, BOUNDARY, DISPLAY, WAVE, VERT3D, FRAG3D,
   BOAT_STATE, VERT_BOAT, FRAG_BOAT, PARTICLE_UPDATE, VERT_PARTICLE, FRAG_PARTICLE,
-  BALL_PUSH, BALL_VEL, VERT_BALL,
+  BALL_PUSH, BALL_VEL,
 } from './shaders';
 import { Mat4, perspective, lookAt, multiply, ortho } from './mat4';
 
@@ -196,32 +196,6 @@ function buildBoat() {
 }
 buildBoat();
 
-// Ball mesh (unit sphere, flat shaded) for the 3D push tool.
-const ballVao = G.createVertexArray()!;
-let ballVertCount = 0;
-function buildBall() {
-  const v: number[] = [];
-  const col = [0.82, 0.84, 0.86];
-  const N = 16, M = 24;
-  const pt = (i: number, j: number) => {
-    const th = Math.PI * i / N, ph = 2 * Math.PI * j / M;
-    return [Math.sin(th) * Math.cos(ph), Math.sin(th) * Math.sin(ph), Math.cos(th)];
-  };
-  for (let i = 0; i < N; i++) for (let j = 0; j < M; j++) {
-    const a = pt(i, j), b = pt(i + 1, j), c = pt(i + 1, j + 1), d = pt(i, j + 1);
-    v.push(...a, ...col, ...b, ...col, ...c, ...col, ...a, ...col, ...c, ...col, ...d, ...col);
-  }
-  G.bindVertexArray(ballVao);
-  const buf = G.createBuffer()!;
-  G.bindBuffer(G.ARRAY_BUFFER, buf);
-  G.bufferData(G.ARRAY_BUFFER, new Float32Array(v), G.STATIC_DRAW);
-  G.enableVertexAttribArray(0); G.vertexAttribPointer(0, 3, G.FLOAT, false, 24, 0);
-  G.enableVertexAttribArray(1); G.vertexAttribPointer(1, 3, G.FLOAT, false, 24, 12);
-  ballVertCount = v.length / 6;
-  G.bindVertexArray(quadVao);
-}
-buildBall();
-
 // Spray particles: N particles stored in two W x H textures.
 const PART_W = 128, PART_H = isMobile ? 32 : 64, PART_N = PART_W * PART_H;
 const partVao = G.createVertexArray()!; // no attributes; uses gl_VertexID
@@ -296,7 +270,6 @@ const pBoat = new Program(FRAG_BOAT, VERT_BOAT, ['aPos', 'aCol']);
 const pPartUpdate = new Program(PARTICLE_UPDATE);
 const pBallPush = new Program(BALL_PUSH);
 const pBallVel = new Program(BALL_VEL);
-const pBall = new Program(FRAG_BOAT, VERT_BALL, ['aPos', 'aCol']);
 const pPart = new Program(FRAG_PARTICLE, VERT_PARTICLE, []);
 
 // ---------- State ----------
@@ -648,19 +621,6 @@ function drawBoat(vp: Mat4, eye: [number, number, number], heightScale: number) 
   G.bindVertexArray(quadVao);
 }
 
-function drawBalls(vp: Mat4, eye: [number, number, number], heightScale: number) {
-  for (const p of pointers.values()) {
-    if (p.orbit) continue;
-    const R = ballRadiusUv() * 2;
-    pBall.use().m4('uVP', vp).v2('uPoint', p.x, p.y).f('uAspect', aspect).f('uHeightScale', heightScale)
-      .f('uScale', R).f('uSink', R * BALL_SINK_FRAC).v3('uEye', eye[0], eye[1], eye[2])
-      .f('uSwell', swellAmp()).f('uSimTime', simTime).f('uChop', chop()).tex('uHeight', wave.read.attach(0));
-    G.bindVertexArray(ballVao);
-    G.drawArrays(G.TRIANGLES, 0, ballVertCount);
-    G.bindVertexArray(quadVao);
-  }
-}
-
 function render2D(t: number) {
   pDisplay.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uTime', t)
     .tex('uDye', dye.read.attach(0)).tex('uPressure', pressure.read.attach(1)).tex('uVelocity', velocity.read.attach(2));
@@ -706,7 +666,6 @@ function render3D() {
   G.bindVertexArray(quadVao);
   const vp = viewProj();
   drawBoat(vp, eye, heightScale);
-  drawBalls(vp, eye, heightScale);
   drawSpray(vp);
   G.disable(G.DEPTH_TEST);
 }
