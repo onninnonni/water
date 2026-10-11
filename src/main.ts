@@ -196,7 +196,7 @@ function buildBoat() {
 buildBoat();
 
 // Spray particles: N particles stored in two W x H textures.
-const PART_W = 64, PART_H = isMobile ? 16 : 32, PART_N = PART_W * PART_H;
+const PART_W = 128, PART_H = isMobile ? 32 : 64, PART_N = PART_W * PART_H;
 const partVao = G.createVertexArray()!; // no attributes; uses gl_VertexID
 
 // ---------- Framebuffers ----------
@@ -308,6 +308,7 @@ const viscOut = $<HTMLOutputElement>('viscOut');
 const splatSlider = $<HTMLInputElement>('splat');
 const heightSlider = $<HTMLInputElement>('height');
 const speedSlider = $<HTMLInputElement>('speed');
+const swellSlider = $<HTMLInputElement>('swell');
 const speedOut = $<HTMLOutputElement>('speedOut');
 const boatBtn = $<HTMLButtonElement>('boat');
 let showBoat = true;
@@ -552,6 +553,7 @@ function step(dt0: number) {
   pWave.use().v2('uTexel', 1 / dyeW, 1 / dyeH).f('uDt', wdt).f('uC2', c2).f('uDamp', wd)
     .f('uAspect', aspect).f('uBoatSize', showBoat ? BOAT_SCALE * 0.25 : 0.0001)
     .f('uDraft', BOAT_SCALE * BOAT_DRAFT / heightScale)
+    .f('uSwell', swellAmp()).f('uSimTime', simTime)
     .tex('uBoat', boatState.read.attach(1));
   for (let i = 0; i < subs; i++) {
     pWave.tex('uField', wave.read.attach(0));
@@ -561,8 +563,10 @@ function step(dt0: number) {
   // 11 (3D). Spray particles thrown off the hull.
   pPartUpdate.use().f('uDt', dt0).f('uTime', (performance.now() % 100000) / 1000).f('uAspect', aspect)
     .f('uHeightScale', heightScale).f('uBoatSize', BOAT_SCALE * 0.25).f('uSpawnRate', showBoat ? 1 : 0)
+    .v2('uSimTexel', tx, ty).f('uSwell', swellAmp()).f('uSimTime', simTime)
     .tex('uA', partRead.a.attach(0)).tex('uB', partRead.b.attach(1))
-    .tex('uField', wave.read.attach(2)).tex('uBoat', boatState.read.attach(3));
+    .tex('uField', wave.read.attach(2)).tex('uBoat', boatState.read.attach(3))
+    .tex('uVelocity', velocity.read.attach(4));
   G.bindVertexArray(quadVao);
   G.bindFramebuffer(G.FRAMEBUFFER, partWrite.fb);
   G.viewport(0, 0, PART_W, PART_H);
@@ -573,7 +577,7 @@ function step(dt0: number) {
 function drawBoat(vp: Mat4, eye: [number, number, number], heightScale: number) {
   if (!showBoat) return;
   pBoat.use().m4('uVP', vp).v2('uTexel', 1 / dyeW, 1 / dyeH).f('uAspect', aspect).f('uHeightScale', heightScale)
-    .f('uScale', BOAT_SCALE).v3('uEye', eye[0], eye[1], eye[2])
+    .f('uScale', BOAT_SCALE).v3('uEye', eye[0], eye[1], eye[2]).f('uSwell', view3D ? swellAmp() : 0).f('uSimTime', simTime)
     .tex('uState', boatState.read.attach(0)).tex('uHeight', wave.read.attach(1));
   G.bindVertexArray(boatVao);
   G.drawArrays(G.TRIANGLES, 0, boatVertCount);
@@ -592,9 +596,10 @@ function render2D(t: number) {
 }
 
 function currentHeightScale() { return 0.06 + (Number(heightSlider.value) / 100) * 0.5; }
+function swellAmp() { return Number(swellSlider.value) / 100 * 0.3; } // height units at full slider
+let simTime = 0;
 
 function drawSpray(vp: Mat4) {
-  if (!showBoat) return;
   pPart.use().m4('uVP', vp).f('uPointScale', canvas.height * 0.012).tex('uA', partRead.a.attach(0));
   G.uniform1i(pPart.uniforms.get('uTexW')!, PART_W);
   G.enable(G.BLEND);
@@ -615,7 +620,7 @@ function render3D() {
   G.clearColor(0.03, 0.07, 0.12, 1);
   G.enable(G.DEPTH_TEST);
   G.clear(G.COLOR_BUFFER_BIT | G.DEPTH_BUFFER_BIT);
-  pMesh.use().m4('uVP', viewProj()).f('uAspect', aspect).f('uHeightScale', heightScale)
+  pMesh.use().m4('uVP', viewProj()).f('uAspect', aspect).f('uHeightScale', heightScale).f('uSwell', swellAmp()).f('uSimTime', simTime)
     .v2('uTexel', 1 / dyeW, 1 / dyeH).v3('uEye', eye[0], eye[1], eye[2])
     .tex('uHeight', wave.read.attach(0)).tex('uVelocity', velocity.read.attach(1));
   G.bindVertexArray(meshVao);
@@ -637,7 +642,7 @@ function frame(now: number) {
   last = now;
   resize();
   if (!velocity) { requestAnimationFrame(frame); return; }
-  if (!paused) step(dt * 60); // dt in "frames" so velocity is in texels/frame
+  if (!paused) { simTime += dt * speedFactor(); step(dt * 60); } // dt in "frames" so velocity is in texels/frame
   if (view3D) render3D(); else render2D(now / 1000);
   requestAnimationFrame(frame);
 }
@@ -650,6 +655,12 @@ requestAnimationFrame(frame);
   r.step = time(() => step(1));
   r.render = time(() => (view3D ? render3D() : render2D(0)));
   return r;
+};
+
+// Advance N frames synchronously (dev only; works while rAF is throttled).
+(window as unknown as { __advance: (n: number) => void }).__advance = (n: number) => {
+  for (let i = 0; i < n; i++) { simTime += speedFactor() / 60; step(1); }
+  if (view3D) render3D(); else render2D(0);
 };
 
 // Debug readback (dev only): sample the sim textures.

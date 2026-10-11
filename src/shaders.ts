@@ -142,6 +142,30 @@ void main() {
   frag = vec4(col, 1.0);
 }`;
 
+
+// Analytic ocean swell layered on top of the simulated height field (wp = world xy / uSimTime s).
+export const SWELL_GLSL = `
+uniform float uSwell;
+uniform float uSimTime;
+const vec2 SK0 = vec2(7.0, 3.0), SK1 = vec2(-4.5, 10.0), SK2 = vec2(14.0, -5.5), SK3 = vec2(21.0, 12.0);
+const float SW0 = 1.6, SW1 = 2.1, SW2 = 2.7, SW3 = 3.3;
+const float SA0 = 0.43, SA1 = 0.26, SA2 = 0.17, SA3 = 0.13;
+float swellH(vec2 wp) {
+  return uSwell * (SA0 * sin(dot(wp, SK0) - uSimTime * SW0) + SA1 * sin(dot(wp, SK1) - uSimTime * SW1 + 1.3)
+                 + SA2 * sin(dot(wp, SK2) - uSimTime * SW2 + 2.1) + SA3 * sin(dot(wp, SK3) - uSimTime * SW3 + 0.7));
+}
+vec2 swellG(vec2 wp) {
+  return uSwell * (SA0 * cos(dot(wp, SK0) - uSimTime * SW0) * SK0 + SA1 * cos(dot(wp, SK1) - uSimTime * SW1 + 1.3) * SK1
+                 + SA2 * cos(dot(wp, SK2) - uSimTime * SW2 + 2.1) * SK2 + SA3 * cos(dot(wp, SK3) - uSimTime * SW3 + 0.7) * SK3);
+}
+// Vertical swell velocity in height units per frame (60 fps frames).
+float swellV(vec2 wp) {
+  return -uSwell / 60.0 * (SA0 * SW0 * cos(dot(wp, SK0) - uSimTime * SW0) + SA1 * SW1 * cos(dot(wp, SK1) - uSimTime * SW1 + 1.3)
+                         + SA2 * SW2 * cos(dot(wp, SK2) - uSimTime * SW2 + 2.1) + SA3 * SW3 * cos(dot(wp, SK3) - uSimTime * SW3 + 0.7));
+}
+vec2 worldXY(vec2 uv, float aspect) { return vec2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0); }
+`;
+
 // Surface wave equation on the height field (x = height, y = vertical velocity, z = splash).
 // h_tt = c^2 * Lap(h) - damping, with Neumann (reflecting) walls via clamped sampling.
 // The boat hull is a solid: inside its footprint the surface is held below the hull bottom,
@@ -155,6 +179,7 @@ uniform float uDamp;
 uniform float uAspect;
 uniform float uBoatSize;   // half-length of the hull footprint, in uv-y units
 uniform float uDraft;      // keel depth in height units
+${SWELL_GLSL}
 void main() {
   vec2 f2 = texture(uField, vUv).xy;
   float hC = f2.x;
@@ -171,7 +196,6 @@ void main() {
   vec2 ax = vec2(1.0 / uBoatSize, 1.0 / (uBoatSize * 0.6));
   vec2 lc = vec2(dot(rel, fwd), dot(rel, side)) * ax;
   float r2 = dot(lc, lc);
-  float splash = 0.0;
   if (r2 < 2.5) {
     // Neighbour cells inside the hull act as a wall (Neumann): use our own height for them.
     vec2 dx = vec2(uTexel.x * uAspect * fwd.x, uTexel.x * uAspect * side.x) * ax;
@@ -184,6 +208,11 @@ void main() {
   float lap = L + R + B + T - 4.0 * hC;
   float v = clamp((f2.y + uC2 * lap * uDt) * uDamp, -1.0, 1.0);
   float h = clamp(hC + v * uDt, -1.0, 1.0);
+  // Whitecaps: the surface breaks where it rises fast enough above the ocean level.
+  vec2 wp = worldXY(vUv, uAspect);
+  float vTot = v + swellV(wp);
+  float hTot = h + swellH(wp);
+  float splash = max(vTot - 0.014, 0.0) * 4.0 * smoothstep(0.0, 0.06, hTot);
 
   if (r2 < 2.5) {
     // Water level the boat floats at: mean of the surface at bow, stern and both beams.
@@ -201,7 +230,7 @@ void main() {
       float ring = 1.0 - smoothstep(1.0, 1.6, r2);
       float excess = max(h - hb - 0.02, 0.0) * ring;
       // Spray when a crest rises above the waterline or the surface slams upward against the hull.
-      splash = excess + max(v - 0.012, 0.0) * 3.0 * ring;
+      splash += excess + max(v - 0.012, 0.0) * 3.0 * ring;
       h -= excess * 0.6;
       v = mix(v, min(v, 0.0), ring);
       h -= ring * min(b.w * 20.0, 0.15) * uDt;
@@ -222,12 +251,15 @@ uniform sampler2D uA;
 uniform sampler2D uB;
 uniform sampler2D uField;
 uniform sampler2D uBoat;
+uniform sampler2D uVelocity;
+uniform vec2 uSimTexel;
 uniform float uDt;
 uniform float uTime;
 uniform float uAspect;
 uniform float uHeightScale;
 uniform float uBoatSize;
 uniform float uSpawnRate;
+${SWELL_GLSL}
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 vec2 toUv(vec2 w) { return vec2(w.x / (2.0 * uAspect) + 0.5, w.y * 0.5 + 0.5); }
 void main() {
@@ -242,31 +274,45 @@ void main() {
     vec3 pos = a.xyz + vel * uDt;
     float life = a.w - uDt / 70.0;
     vec2 uv = toUv(pos.xy);
-    float water = texture(uField, uv).x * uHeightScale;
+    float water = (texture(uField, uv).x + swellH(pos.xy)) * uHeightScale;
     if (pos.z < water - 0.01 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) life = 0.0;
     oA = vec4(pos, life);
     oB = vec4(vel, seed);
     return;
   }
-  // Dead: try to spawn at a random point on the hull rim where water is being thrown off.
+  // Dead: try to spawn where the surface is breaking. Most candidates are random points on
+  // the ocean; some are on the hull rim so the boat's own spray stays dense.
   vec4 bt = texelFetch(uBoat, ivec2(0), 0);
   float r1 = hash(vec2(seed, uTime));
   float r2 = hash(vec2(uTime * 1.7, seed + 2.0));
   float r3 = hash(vec2(seed * 3.1, uTime + 5.0));
-  float ang = r1 * 6.2831853;
-  vec2 fwd = vec2(cos(bt.z), sin(bt.z));
-  vec2 side = vec2(-fwd.y, fwd.x);
-  vec2 local = vec2(cos(ang) * uBoatSize * 1.08, sin(ang) * uBoatSize * 0.6 * 1.08);
-  vec2 off = fwd * local.x + side * local.y;
-  vec2 uv = bt.xy + vec2(off.x / uAspect, off.y);
+  float r4 = hash(vec2(seed * 7.7 + 1.0, uTime * 0.37));
+  vec2 uv;
+  vec2 outward = vec2(0.0);
+  if (r4 < 0.25 && uSpawnRate > 0.0) {
+    float ang = r1 * 6.2831853;
+    vec2 fwd = vec2(cos(bt.z), sin(bt.z));
+    vec2 side = vec2(-fwd.y, fwd.x);
+    vec2 local = vec2(cos(ang) * uBoatSize * 1.08, sin(ang) * uBoatSize * 0.6 * 1.08);
+    vec2 off = fwd * local.x + side * local.y;
+    uv = bt.xy + vec2(off.x / uAspect, off.y);
+    outward = normalize(off + 1e-5);
+  } else {
+    uv = vec2(r1, hash(vec2(r1 * 5.3, seed + uTime)));
+  }
   vec3 fld = texture(uField, uv).xyz;
   float splash = fld.z;
-  if (splash * uSpawnRate > r2 * 0.03) {
-    vec3 pos = vec3((uv.x - 0.5) * 2.0 * uAspect, (uv.y - 0.5) * 2.0, fld.x * uHeightScale + 0.02);
-    vec2 outward = normalize(off + 1e-5);
-    float sp = min(splash * 1.5, 0.08);
-    vec3 vel = vec3(outward * sp * (0.6 + r3), 0.035 + sp * 0.8 + r3 * 0.02);
-    vel.xy += fwd * bt.w * 2.0 * uAspect; // carry the boat's motion
+  if (splash > r2 * 0.03) {
+    vec2 wp = worldXY(uv, uAspect);
+    vec3 pos = vec3(wp, (fld.x + swellH(wp)) * uHeightScale + 0.015);
+    // Throw downhill off the crest (surface gradient) and with the current.
+    vec2 hx = vec2(texture(uField, uv + vec2(0.002, 0.0)).x - texture(uField, uv - vec2(0.002, 0.0)).x,
+                   texture(uField, uv + vec2(0.0, 0.002)).x - texture(uField, uv - vec2(0.0, 0.002)).x);
+    vec2 dir = normalize(-hx - swellG(wp) * 0.004 + outward * 0.1 + 1e-5);
+    vec2 cur = texture(uVelocity, uv).xy * uSimTexel * 2.0 * vec2(uAspect, 1.0); // world units / frame
+    float sp = min(splash * 1.2, 0.07);
+    vec3 vel = vec3(dir * sp * (0.5 + r3) + cur * 0.8, 0.03 + sp * 0.9 + r3 * 0.02);
+    vel.xy += vec2(cos(bt.z), sin(bt.z)) * bt.w * 2.0 * uAspect * step(0.5, length(outward));
     oA = vec4(pos, 1.0);
     oB = vec4(vel, seed);
   } else {
@@ -312,11 +358,13 @@ uniform sampler2D uHeight;
 uniform mat4 uVP;
 uniform float uAspect;
 uniform float uHeightScale;
+${SWELL_GLSL}
 out vec2 vUv;
 out vec3 vPos;
 void main() {
-  float h = texture(uHeight, aUv).x;
-  vec3 p = vec3((aUv.x - 0.5) * 2.0 * uAspect, (aUv.y - 0.5) * 2.0, h * uHeightScale);
+  vec2 wp = worldXY(aUv, uAspect);
+  float h = texture(uHeight, aUv).x + swellH(wp);
+  vec3 p = vec3(wp, h * uHeightScale);
   vUv = aUv;
   vPos = p;
   gl_Position = uVP * vec4(p, 1.0);
@@ -334,6 +382,7 @@ uniform vec2 uTexel;
 uniform vec3 uEye;
 uniform float uAspect;
 uniform float uHeightScale;
+${SWELL_GLSL}
 
 vec3 sky(vec3 d) {
   float t = clamp(d.z, 0.0, 1.0);
@@ -352,7 +401,8 @@ void main() {
   float hT = texture(uHeight, vUv + vec2(0.0, uTexel.y)).x;
   float dx = 2.0 * uAspect * uTexel.x;
   float dy = 2.0 * uTexel.y;
-  vec3 n = normalize(vec3(-(hR - hL) * uHeightScale / (2.0 * dx), -(hT - hB) * uHeightScale / (2.0 * dy), 1.0));
+  vec2 sg = swellG(vPos.xy);
+  vec3 n = normalize(vec3(-((hR - hL) / (2.0 * dx) + sg.x) * uHeightScale, -((hT - hB) / (2.0 * dy) + sg.y) * uHeightScale, 1.0));
 
   vec3 V = normalize(uEye - vPos);
   vec3 Rv = reflect(-V, n);
@@ -360,17 +410,17 @@ void main() {
 
   // Refracted pool floor.
   vec3 Rf = refract(-V, n, 1.0 / 1.333);
-  float depth = 0.5;
+  float depth = 1.2;
   float t = (-depth - vPos.z) / min(Rf.z, -0.05);
   vec3 floorP = vPos + Rf * t;
   vec2 fuv = vec2(floorP.x / (2.0 * uAspect) + 0.5, floorP.y * 0.5 + 0.5);
   float tile = smoothstep(0.46, 0.5, abs(fract(fuv.x * 8.0) - 0.5)) +
                smoothstep(0.46, 0.5, abs(fract(fuv.y * 8.0) - 0.5));
-  vec3 floorCol = vec3(0.12, 0.45, 0.62) + tile * 0.10;
+  vec3 floorCol = vec3(0.08, 0.32, 0.46) + tile * 0.05;
   float outside = step(0.0, -fuv.x) + step(1.0, fuv.x) + step(0.0, -fuv.y) + step(1.0, fuv.y);
   floorCol = mix(floorCol, vec3(0.05, 0.12, 0.2), clamp(outside, 0.0, 1.0));
-  float absorb = exp(-length(Rf * t) * 1.2);
-  vec3 water = vec3(0.02, 0.15, 0.3);
+  float absorb = exp(-length(Rf * t) * 1.6);
+  vec3 water = vec3(0.01, 0.12, 0.24);
   vec3 refr = mix(water, floorCol, absorb);
 
   vec3 col = mix(refr, sky(Rv), fresnel);
@@ -379,6 +429,10 @@ void main() {
   col += vec3(1.0) * pow(max(dot(n, H), 0.0), 120.0) * 0.8;
   float speed = length(texture(uVelocity, vUv).xy);
   col += vec3(0.15, 0.2, 0.2) * min(speed * 0.05, 0.4);
+  // Foam on breaking crests.
+  float foam = clamp(texture(uHeight, vUv).z * 12.0, 0.0, 1.0);
+  float fn = fract(sin(dot(floor(vUv * 900.0), vec2(12.9898, 78.233))) * 43758.5453);
+  col = mix(col, vec3(0.92, 0.96, 1.0), foam * (0.55 + 0.45 * fn));
   frag = vec4(col, 1.0);
 }`;
 
@@ -418,11 +472,13 @@ uniform vec2 uTexel;
 uniform float uAspect;
 uniform float uHeightScale;
 uniform float uScale;
+${SWELL_GLSL}
 out vec3 vCol;
 out vec3 vWorld;
 vec3 world(vec2 uv) {
-  float h = texture(uHeight, uv).x;
-  return vec3((uv.x - 0.5) * 2.0 * uAspect, (uv.y - 0.5) * 2.0, h * uHeightScale);
+  vec2 wp = worldXY(uv, uAspect);
+  float h = texture(uHeight, uv).x + swellH(wp);
+  return vec3(wp, h * uHeightScale);
 }
 void main() {
   vec4 s = texelFetch(uState, ivec2(0), 0);
