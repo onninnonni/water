@@ -210,6 +210,25 @@ export class SeaAudio {
     this.burst(this.white, 'highpass', 1800, 0.4, 0.35 * i, 0.25, 2.6, 0.15, 0.5);
     this.creak(1); this.groan(0.6 + 0.4 * i);
   }
+  // A drop falling from the vault of the Leviathan's lair into still water.
+  drip() {
+    if (!this.ctx) return;
+    const f = 900 + Math.random() * 900;
+    this.tone('sine', f, f * 0.55, 0.06 + Math.random() * 0.05, 0.12, 0, 0.9);
+  }
+  // Burning water: snaps and pops over a low roar.
+  crackle(i: number) {
+    if (!this.ctx || i < 0.02) return;
+    this.burst(this.white, 'highpass', 1500 + Math.random() * 2500, 0.8, 0.25 * i, 0.002, 0.05 + Math.random() * 0.08, Math.random() * 0.2, 0.2);
+    if (Math.random() < 0.4) this.burst(this.brown, 'lowpass', 220, 0.7, 0.35 * i, 0.08, 0.6, 0, 0.3);
+  }
+  fireball(dist: number) {
+    if (!this.ctx) return;
+    const v = vol(dist, 60);
+    this.burst(this.brown, 'lowpass', 300, 0.8, 1.1 * v, 0.02, 0.9, 0, 0.5);
+    this.burst(this.white, 'bandpass', 700, 0.6, 0.5 * v, 0.05, 0.8, 0, 0.4);
+    this.tone('sawtooth', 70, 40, 0.25 * v, 0.7, 0, 0.4);
+  }
   crunch(i: number) {
     if (!this.ctx) return;
     this.burst(this.brown, 'lowpass', 260, 1, 1.3 * i, 0.01, 1.0);

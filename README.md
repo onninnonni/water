@@ -36,6 +36,12 @@ Live: https://onnin.no · The original 2D fluid simulator: https://pikos.org/juh
   red ring on the map), with its own war-drum and deep-choir music.
 - **The storm:** in the heart of the storm the ship can fly off a crest and slam into the trough
   below: a splash-down throws white water over the deck, staggers the crew and drenches the lens.
+- **Into the deep:** riding the Leviathan with both hooks set, `X` flips the hooks to bare the soft
+  underside of its scales. It sounds at once, carrying you down to an air pocket in a cave where a
+  ghost ship waits: half again as big, faster, with heavier, quicker cannons and a bow fire-thrower
+  whose fireballs set the sea ablaze, burning any ship (or serpent) in it. Take her wheel and set
+  sail to run the drowned tunnel and breach the surface where you went down. Your old ship stays
+  with her crew, or sinks if you sailed her alone.
 - **Touch:** left thumb moves or steers, right thumb looks, buttons for everything else.
 
 ## How it works

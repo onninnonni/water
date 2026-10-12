@@ -216,6 +216,17 @@ export function buildCannonMesh(): number[] {
 }
 
 // Bow harpoon (a ballista) in its pivot frame, aiming along +x.
+// The ghost ship's bow weapon: a bronze fire-thrower on a swivel; its mouth glows.
+export function buildFireLauncherMesh(): number[] {
+  const m = new MeshBuilder();
+  const BRONZE: V3 = [0.42, 0.3, 0.14], DARK: V3 = [0.08, 0.07, 0.07];
+  m.box(-0.4, 0.4, -0.4, 0.4, -1.25, -0.2, DARK);
+  m.tube([-1.1, 0, 0], [1.7, 0, 0], 0.42, 0.55, 10, BRONZE, true);
+  m.tube([1.7, 0, 0], [2.2, 0, 0], 0.62, 0.72, 10, BRONZE);
+  m.tube([2.15, 0, 0], [2.22, 0, 0], 0.5, 0.5, 10, [2.95, 2.4, 2.05], true);
+  for (const x of [-0.6, 0.4, 1.3]) m.tube([x, 0, 0], [x + 0.12, 0, 0], 0.5, 0.5, 10, DARK);
+  return m.data;
+}
 export function buildHarpoonMesh(): number[] {
   const m = new MeshBuilder();
   const W: V3 = [0.32, 0.2, 0.11], IRON: V3 = [0.12, 0.12, 0.13];
@@ -275,6 +286,7 @@ export class Ship {
   z = 0; vz = 0; th = 0; thv = 0; ph = 0; phv = 0;
   rudder = 0; sail = 0; sailSet = 0.08; hull = 100;
   u = 0; imm = 0; waterZ = 0;
+  scale = 1; power = 1; // the ghost ship is a bigger, faster hull; local coordinates stay unscaled
   events: ShipEvent[] = [];
   private slamCd = 0; private crashCd = 0; private greenCd = 0; private splashCd = 0;
   private minVz = 0; private peakDecel = 0; private airT = 0;
@@ -287,6 +299,7 @@ export class Ship {
   }
   local(lx: number, ly: number, lz: number): V3 {
     const { X, Y, Z } = shipAxes(this.psi, this.th, this.ph);
+    const S = this.scale; lx *= S; ly *= S; lz *= S;
     return [this.x + X[0] * lx + Y[0] * ly + Z[0] * lz, this.y + X[1] * lx + Y[1] * ly + Z[1] * lz, this.z + X[2] * lx + Y[2] * ly + Z[2] * lz];
   }
   impulse(ix: number, iy: number, roll: number) { this.vx += ix; this.vy += iy; this.phv += roll; }
@@ -316,15 +329,16 @@ export class Ship {
   step(dt: number, windX: number, windY: number) {
     const c = Math.cos(this.psi), s = Math.sin(this.psi);
     const fx = c, fy = s, lx = -s, ly = c;
-    const pts = [[16, 0], [-16, 0], [0, 4.6], [0, -4.6], [0, 0]];
+    const S = this.scale;
+    const pts = [[16 * S, 0], [-16 * S, 0], [0, 4.6 * S], [0, -4.6 * S], [0, 0]];
     for (let i = 0; i < 5; i++) sampleWater(this.x + fx * pts[i][0] + lx * pts[i][1], this.y + fy * pts[i][0] + ly * pts[i][1], this.sm[i]);
     const [b, st, pt, sb, ce] = this.sm;
     const zT = (b.z + st.z + pt.z + sb.z + 2 * ce.z) / 6;
     this.waterZ = ce.z;
-    const thT = Math.atan2(b.z - st.z, 32), phT = Math.atan2(pt.z - sb.z, 9.2);
+    const thT = Math.atan2(b.z - st.z, 32 * S), phT = Math.atan2(pt.z - sb.z, 9.2 * S);
     const wvx = (b.vx + st.vx + pt.vx + sb.vx + ce.vx) / 5 + windX * 0.03;
     const wvy = (b.vy + st.vy + pt.vy + sb.vy + ce.vy) / 5 + windY * 0.03;
-    const along = (b.z - st.z) / 32, across = (pt.z - sb.z) / 9.2;
+    const along = (b.z - st.z) / (32 * S), across = (pt.z - sb.z) / (9.2 * S);
     const gx = fx * along + lx * across, gy = fy * along + ly * across;
 
     // Sails unfurl slowly toward the set; they drive best with the wind behind.
@@ -334,7 +348,7 @@ export class Ship {
     const rvx = this.vx - wvx, rvy = this.vy - wvy;
     const u = rvx * fx + rvy * fy, v = rvx * lx + rvy * ly;
     this.u = u;
-    const thrust = Math.max(this.sailSet - 0.08, 0) / 0.92 * eff * 1.0;
+    const thrust = Math.max(this.sailSet - 0.08, 0) / 0.92 * eff * this.power;
     const fu = thrust - 0.02 * u - 0.012 * u * Math.abs(u);
     const fv = -1.0 * v - 0.2 * v * Math.abs(v);
     const ax = fx * fu + lx * fv - 9.81 * 0.8 * gx + windX * 0.002;
@@ -358,7 +372,7 @@ export class Ship {
     const heel = clamp(this.r * u * 0.25, -0.12, 0.12) + this.sailSet * 0.07 * Math.sin(windAng);
     this.phv += ((phT + heel - this.ph) * 3.0 - 1.3 * this.phv) * dt; this.ph = clamp(this.ph + this.phv * dt, -0.6, 0.6);
 
-    const bowZ = this.z + 16 * Math.sin(this.th), bowVz = this.vz + 16 * this.thv * Math.cos(this.th);
+    const bowZ = this.z + 16 * S * Math.sin(this.th), bowVz = this.vz + 16 * S * this.thv * Math.cos(this.th);
     this.imm = b.z - bowZ;
     const rel = b.vz - bowVz;
     this.slamCd -= dt; this.crashCd -= dt; this.greenCd -= dt;
@@ -391,24 +405,26 @@ export class Ship {
 
   private collide(fx: number, fy: number, lx: number, ly: number) {
     let impact = 0;
-    for (const [px, py] of [[17, 0], [8, 4.5], [8, -4.5], [-8, 4.8], [-8, -4.8], [-17, 3.5], [-17, -3.5]]) {
+    const S = this.scale;
+    for (const [qx, qy] of [[17, 0], [8, 4.5], [8, -4.5], [-8, 4.8], [-8, -4.8], [-17, 3.5], [-17, -3.5]]) {
+      const px = qx * S, py = qy * S;
       const wx = this.x + fx * px + lx * py, wy = this.y + fy * px + ly * py;
       const H = terrainHeight(wx, wy);
-      if (H <= -3.8) continue;
+      if (H <= -3.8 * S) continue;
       const e = 2;
       const gx = (terrainHeight(wx + e, wy) - terrainHeight(wx - e, wy)) / (2 * e);
       const gy = (terrainHeight(wx, wy + e) - terrainHeight(wx, wy - e)) / (2 * e);
       const gl = Math.hypot(gx, gy);
       if (gl < 1e-4) continue;
       const nx = gx / gl, ny = gy / gl;
-      const pen = Math.min((H + 3.8) / Math.max(gl, 0.3), 2);
+      const pen = Math.min((H + 3.8 * S) / Math.max(gl, 0.3), 2);
       this.x -= nx * pen; this.y -= ny * pen;
       const vn = this.vx * nx + this.vy * ny;
       if (vn > 0) { this.vx -= nx * vn * 1.5; this.vy -= ny * vn * 1.5; impact = Math.max(impact, vn); }
     }
-    for (const p of PILLARS) for (const hx of [14, 7, 0, -7, -14]) {
+    for (const p of PILLARS) for (const hx of [14 * S, 7 * S, 0, -7 * S, -14 * S]) {
       const cx = this.x + fx * hx, cy = this.y + fy * hx;
-      const dx = cx - p.x, dy = cy - p.y, d = Math.hypot(dx, dy), minD = p.r + 4.5;
+      const dx = cx - p.x, dy = cy - p.y, d = Math.hypot(dx, dy), minD = p.r + 4.5 * S;
       if (d >= minD || d < 1e-3) continue;
       const nx = dx / d, ny = dy / d;
       this.x += nx * (minD - d); this.y += ny * (minD - d);

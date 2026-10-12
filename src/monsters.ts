@@ -16,6 +16,7 @@ export interface Monster {
   lx: number; ly: number; vx: number; vy: number; // measured velocity, sent to other clients
   // A rider with both hooks set steers the beast (world host only): turn -1..1, gas -1..1.
   rider: number; riderShip: number; steerT: number; steerTurn: number; steerGas: number; ramCd: number;
+  dive: number; // 0..1 sounding into the deep (hooks flipped under its scales), then gone
 }
 
 export function buildSegmentMesh(): number[] {
@@ -54,7 +55,8 @@ export function layoutSegments(m: Monster, time: number) {
     const s = m.scale;
     const lift = m.rear * 7 * s * Math.max(0, 1 - i / 4);
     const und = 2.2 * Math.sqrt(s) * Math.sin(m.phase - i * 0.55) * (i === 0 ? 0.3 : 1);
-    segs.push([ax, ay, w - 0.5 * s + und + lift + (i === 0 ? 1.0 * s : 0) - m.dying * 9 * s + 0.15 * Math.sin(time * 3 + i)]);
+    const sound = m.dive > 0 ? m.dive * m.dive * 55 * s * Math.min(1, 0.4 + (SEGS - i) / SEGS) : 0;
+    segs.push([ax, ay, w - 0.5 * s + und + lift + (i === 0 ? 1.0 * s : 0) - m.dying * 9 * s - sound + 0.15 * Math.sin(time * 3 + i)]);
   }
   m.segs = segs;
 }
@@ -81,7 +83,7 @@ function make(id: number, x: number, y: number, hd: number, boss: boolean): Mons
   return {
     id, x, y, hd, sp: boss ? 12 : 9, phase: 0, hp: boss ? 40 : 4, maxHp: boss ? 40 : 4, st: MS.Approach, t: 0, rear: 0, dying: 0, hurt: 0,
     trail: [], segs: [], orbit: boss ? 110 + Math.random() * 30 : 45 + Math.random() * 30, dir: Math.random() < 0.5 ? 1 : -1,
-    boss, scale: boss ? 3.2 : 1, target: 0, held: 0, rider: 0, riderShip: 0, steerT: 99, steerTurn: 0, steerGas: 0, ramCd: 0, lx: x, ly: y, vx: Math.cos(hd) * (boss ? 12 : 9), vy: Math.sin(hd) * (boss ? 12 : 9),
+    boss, scale: boss ? 3.2 : 1, target: 0, held: 0, rider: 0, riderShip: 0, steerT: 99, steerTurn: 0, steerGas: 0, ramCd: 0, dive: 0, lx: x, ly: y, vx: Math.cos(hd) * (boss ? 12 : 9), vy: Math.sin(hd) * (boss ? 12 : 9),
   };
 }
 
@@ -146,9 +148,10 @@ export class MonsterSystem {
         head = tgt ? Math.atan2(dy, dx) : m.hd; speed = 11 * S;
         if (m.t > (m.boss ? 4 : 5) && (storm >= 0.08 || m.boss)) { m.st = MS.Circle; m.t = 0; }
       }
+      if (m.dive > 0) { m.dive = Math.min(1, m.dive + dt / 5); head = m.hd; speed = 16 * S; m.rear = 0; }
       // Ridden and steered: the rider's hooks override the hunt. Steer it into a ship to ram her.
       m.steerT += dt; m.ramCd -= dt;
-      const steered = m.rider !== 0 && m.steerT < 0.6 && m.st !== MS.Dying;
+      const steered = m.rider !== 0 && m.steerT < 0.6 && m.st !== MS.Dying && m.dive === 0;
       if (steered) {
         head = m.hd + m.steerTurn * 1.4; speed = (11 + 9 * m.steerGas) * S;
         if (m.st === MS.Lunge || m.st === MS.Approach) m.st = MS.Circle;
@@ -173,6 +176,7 @@ export class MonsterSystem {
       layoutSegments(m, time);
     }
     this.list = this.list.filter((m) => {
+      if (m.dive >= 1) { if (m.boss) this.bossCooldown = 90; return false; }
       if (m.dying >= 1) { if (m.boss) this.bossCooldown = 180; return false; }
       const far = !ships.some((s) => Math.hypot(m.x - s.x, m.y - s.y) < (m.boss ? 1600 : 450));
       if (far && (m.st === MS.Retreat || m.boss) && !(m.rider && m.steerT < 2)) { if (m.boss) this.bossCooldown = 20; return false; }
@@ -195,6 +199,8 @@ export class MonsterSystem {
       m.sp *= Math.exp(-dt * Math.min(d - len, 20) * 0.04);
     }
   }
+
+  sound(id: number) { const m = this.list.find((x) => x.id === id); if (m && m.dive === 0) m.dive = 0.001; }
 
   steer(id: number, rider: number, riderShip: number, turn: number, gas: number) {
     const m = this.list.find((x) => x.id === id);
@@ -219,7 +225,7 @@ export class MonsterSystem {
     return false;
   }
   pack(): number[][] {
-    return this.list.map((m) => [m.id, +m.x.toFixed(2), +m.y.toFixed(2), +m.hd.toFixed(3), +m.phase.toFixed(3), m.hp, m.st, +m.rear.toFixed(3), +m.dying.toFixed(3), +m.hurt.toFixed(2), m.boss ? 1 : 0, m.maxHp, +m.sp.toFixed(2), +m.vx.toFixed(2), +m.vy.toFixed(2)]);
+    return this.list.map((m) => [m.id, +m.x.toFixed(2), +m.y.toFixed(2), +m.hd.toFixed(3), +m.phase.toFixed(3), m.hp, m.st, +m.rear.toFixed(3), +m.dying.toFixed(3), +m.hurt.toFixed(2), m.boss ? 1 : 0, m.maxHp, +m.sp.toFixed(2), +m.vx.toFixed(2), +m.vy.toFixed(2), +m.dive.toFixed(3)]);
   }
   // Other clients: dead-reckon from the world host's snapshot (taken at host time tm) and ease
   // toward it, advancing the body wave locally so motion stays smooth between 10 Hz updates.
@@ -237,6 +243,7 @@ export class MonsterSystem {
       m.hd += Math.atan2(Math.sin(r[3] - m.hd), Math.cos(r[3] - m.hd)) * k;
       const rate = (1.6 + sp * 0.12) / Math.sqrt(m.scale);
       m.phase += rate * dt + (r[4] + rate * age - m.phase) * k;
+      m.dive = r[15] ?? 0;
       m.hp = r[5]; m.st = r[6] as MS; m.rear += (r[7] - m.rear) * k; m.dying = r[8]; m.hurt = r[9]; m.maxHp = r[11] ?? m.maxHp;
       pushTrail(m); layoutSegments(m, time);
       return m;

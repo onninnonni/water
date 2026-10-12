@@ -106,7 +106,18 @@
     #hpfill { height: 100%; width: 100%; background: #d9d2c4; transition: width 0.2s; }
     #hurt { position: fixed; inset: 0; pointer-events: none; opacity: 0;
       background: radial-gradient(ellipse at center, rgba(150,0,0,0) 40%, rgba(150,0,0,0.75) 100%); }
-    #reelT, #cutT, #jumpT { display: none; }
+    #reelT, #cutT, #jumpT, #diveT { display: none; }
+    body.cave #compass, body.cave #minimap { display: none; }
+    /* Going down into the deep (and back up): dark water, rushing bubbles. */
+    #deep { position: fixed; inset: 0; pointer-events: none; display: none; opacity: 0; align-items: center; justify-content: center;
+      background: radial-gradient(ellipse at 50% 40%, rgba(10,40,52,0.9), rgba(1,6,10,1) 75%); overflow: hidden; }
+    #deep::before, #deep::after { content: ""; position: absolute; inset: -50% 0 0 0;
+      background-image: radial-gradient(circle, rgba(170,220,235,0.35) 0 2px, transparent 3px), radial-gradient(circle, rgba(170,220,235,0.25) 0 1px, transparent 2px);
+      background-size: 90px 120px, 47px 61px; background-position: 0 0, 23px 31px; animation: bubbles 1.6s linear infinite; }
+    #deep::after { background-size: 140px 170px, 70px 95px; animation-duration: 2.7s; opacity: 0.7; }
+    @keyframes bubbles { from { transform: translateY(0); } to { transform: translateY(-120px); } }
+    #deepText { position: relative; font-size: clamp(16px, 3vw, 24px); letter-spacing: 0.4em; text-transform: uppercase; padding-left: 0.4em;
+      color: rgba(200,235,240,0.85); text-shadow: 0 2px 20px rgba(0,0,0,0.9); transition: opacity 0.6s; }
     /* Sea water thrown over the lens after a splash-down. */
     #drench { position: fixed; inset: 0; pointer-events: none; display: none; opacity: 0;
       background:
@@ -140,6 +151,7 @@
   <div id="vignette"></div>
   <div id="hurt"></div>
   <div id="drench"></div>
+  <div id="deep"><div id="deepText">Down… into the deep</div></div>
 
   <div id="hud">
     <canvas id="compass"></canvas>
@@ -172,6 +184,7 @@
     <div id="touchui">
       <div id="stick"><div id="knob"></div></div>
       <div id="tbtns">
+        <button id="diveT" class="tbtn">Dive</button>
         <button id="jumpT" class="tbtn">Jump</button>
         <button id="cutT" class="tbtn">Cut loose</button>
         <button id="reelT" class="tbtn">Reel</button>
