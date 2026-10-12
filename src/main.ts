@@ -11,6 +11,7 @@ import { buildAvatarParts, buildWings, avatarPose, RZ, TR, AvatarParts } from '.
 import { MonsterSystem, Monster, MS, segRadius, buildSegmentMesh, buildHeadMesh, BOSS_POS } from './monsters';
 import { MeshBuilder } from './mesh';
 import { CAVE, CAVE_SHIP, buildCave, ghostify } from './cave';
+import { Jet, buildJetMesh } from './jet';
 import { Net, NetMsg } from './net';
 import { SeaAudio } from './audio';
 import type { V3 } from './mesh';
@@ -129,6 +130,7 @@ const ghostSailMesh = solid(ghostify(buildSailMesh(), true));
 const ghostCannonMesh = solid(ghostify(buildCannonMesh()));
 const fireLauncherMesh = solid(buildFireLauncherMesh());
 const fireballMesh = solid((() => { const m = new MeshBuilder(); m.sphere([0, 0, 0], 0.9, 0.9, 0.9, 10, [2.95, 2.45, 2.1]); return m.data; })());
+const jetMesh = solid(buildJetMesh());
 const cave = buildCave();
 const caveMesh = solid(cave.data);
 const wheelMesh = solid(buildWheelMesh());
@@ -246,7 +248,7 @@ const GHOST_NAMES = ['Drowned Bride', 'Pale Revenant', 'Wraith of the Deep', 'Ho
 const GHOST_SCALE = 1.45;
 function makeGhost(e: ShipEnt) { e.ghost = true; e.ship.scale = GHOST_SCALE; e.ship.power = 1.7; }
 
-type Mode = 'walk' | 'helm' | 'harpoon' | 'climb' | 'nest' | 'plank' | 'down' | 'glide' | 'ride' | 'deep';
+type Mode = 'walk' | 'helm' | 'harpoon' | 'climb' | 'nest' | 'plank' | 'down' | 'glide' | 'ride' | 'deep' | 'jet';
 interface Player {
   id: number; name: string; color: number; crew: number; on: number; x: number; y: number; z: number; yaw: number; pitch: number; mode: Mode;
   hp: number; walk: number; phase: number; wave: number; aimYaw: number; aimPitch: number; moving: boolean; swing: number; mast: number;
@@ -254,10 +256,11 @@ interface Player {
   tag?: HTMLDivElement; lastStep: number; seen: number;
   // Gliding (on = -1, x/y/z in world space) and riding the Leviathan (on = RIDE_BASE - monster id).
   gv: V3; ride: number; hookMask: number; rideT: number;
+  jr: number; // jet roll (flying an F-15: on = JET_ON, x/y/z world, yaw/pitch the jet's)
 }
 const newPlayer = (id: number, name: string, color: number): Player => ({
   id, name, color, crew: 0, on: 0, x: -6, y: 0, z: MAIN_DECK, yaw: 0, pitch: 0, mode: 'walk', hp: 100, walk: 0, phase: 0, wave: 0, aimYaw: 0, aimPitch: 0,
-  moving: false, swing: 0, mast: 0, reel: false, snaps: [], lastStep: 0, seen: now(), gv: [0, 0, 0], ride: 0, hookMask: 0, rideT: 0,
+  moving: false, swing: 0, mast: 0, reel: false, snaps: [], lastStep: 0, seen: now(), gv: [0, 0, 0], ride: 0, hookMask: 0, rideT: 0, jr: 0,
 });
 const me = newPlayer(1, 'Pirate', 0);
 const others = new Map<number, Player>();
@@ -276,7 +279,7 @@ function lockPointer() {
 
 const atm = { s: 0, fog: [0, 0, 0] as V3, sky: [0, 0, 0] as V3, sun: [0, 0, 0] as V3, ambT: [0, 0, 0] as V3, ambB: [0, 0, 0] as V3, fogDen: 0, rain: 0, wind: 0 };
 const windVec: [number, number] = [Math.cos(WIND_DIR), Math.sin(WIND_DIR)];
-function focusShip(): Ship { return onShip()?.ship ?? crewShip()?.ship ?? ships.get(0)?.ship ?? [...ships.values()][0]?.ship ?? new Ship(); }
+function focusShip(): Ship { if (me.mode === 'jet' || jetDead > 0) return jetProxy; return onShip()?.ship ?? crewShip()?.ship ?? ships.get(0)?.ship ?? [...ships.values()][0]?.ship ?? new Ship(); }
 function updateAtmosphere(dt: number) {
   if (inCave()) {
     Object.assign(atm, { s: 0, fog: [0.025, 0.06, 0.07], sky: [0.02, 0.04, 0.045], sun: [0.12, 0.2, 0.2], ambT: [0.26, 0.38, 0.4], ambB: [0.1, 0.17, 0.18], fogDen: 0.0035, rain: 0, wind: 0 });
@@ -367,7 +370,7 @@ function toLocal(e: ShipEnt, w: V3): V3 {
 function interact() {
   if (!playing || me.mode === 'down' || me.mode === 'deep') return;
   if (me.mode === 'ride') { plantHook(1); return; }
-  if (me.mode === 'glide') return;
+  if (me.mode === 'glide' || me.mode === 'jet') return;
   const e = onShip();
   if (me.mode === 'helm') { leaveHelm(); return; }
   if (me.mode === 'harpoon') { me.mode = 'walk'; me.x = HARPOON.x - 1.9; me.y = 0; reelHeld = false; return; }
@@ -397,7 +400,7 @@ function leaveHelm() {
 function fireAction() {
   if (!playing || me.mode === 'down' || me.mode === 'deep') return;
   if (me.mode === 'ride') { plantHook(0); return; }
-  if (me.mode === 'glide') return;
+  if (me.mode === 'glide' || me.mode === 'jet') return;
   const e = onShip();
   if (!e) return;
   if (me.mode === 'harpoon') {
@@ -421,24 +424,26 @@ window.addEventListener('keydown', (e) => {
   if (!playing || e.repeat) return;
   if (k === 'e') interact();
   if (k === 'q') { if (me.mode === 'ride') plantHook(0); else wave(); }
-  if (k === 'j') jump();
+  if (k === 'j') { if (me.mode === 'jet') eject(); else jump(); }
+  if (k === 'r' && me.mode === 'jet') fireMissile();
   if (k === 'x') sound();
   if (k === 'c') toggleCam();
   if (k === 'm') toggleMute();
   if (k === 'g') cutGangplank();
-  if (k === ' ' || k === 'f') { fireAction(); e.preventDefault(); }
+  if (k === ' ' || k === 'f') { if (me.mode === 'jet') gunHeld = true; else fireAction(); e.preventDefault(); }
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) e.preventDefault();
 });
-window.addEventListener('keyup', (e) => keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
+window.addEventListener('keyup', (e) => { const k = e.key.length === 1 ? e.key.toLowerCase() : e.key; keys.delete(k); if (k === ' ' || k === 'f') gunHeld = false; });
 window.addEventListener('blur', () => { keys.clear(); reelHeld = false; });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('mousedown', (e) => {
   if (!playing || isTouch) return;
   if (document.pointerLockElement !== canvas) { lockPointer(); if (e.button !== 0) return; }
+  if (me.mode === 'jet') { if (e.button === 0) gunHeld = true; if (e.button === 2) fireMissile(); return; }
   if (e.button === 0) fireAction();
   if (e.button === 2) { if (me.mode === 'ride') plantHook(1); else reelHeld = true; }
 });
-canvas.addEventListener('mouseup', (e) => { if (e.button === 2) reelHeld = false; });
+canvas.addEventListener('mouseup', (e) => { if (e.button === 2) reelHeld = false; if (e.button === 0) gunHeld = false; });
 document.addEventListener('mousemove', (e) => {
   if (document.pointerLockElement === canvas) { look.dx += e.movementX; look.dy += e.movementY; }
 });
@@ -463,8 +468,9 @@ const endPtr = (e: PointerEvent) => {
 canvas.addEventListener('pointerup', endPtr);
 canvas.addEventListener('pointercancel', endPtr);
 const tap = (id: string, fn: () => void) => $(id).addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); fn(); });
-tap('fireT', fireAction); tap('actT', interact); tap('waveT', wave); tap('cutT', cutGangplank);
-tap('jumpT', jump); tap('diveT', sound);
+tap('fireT', () => { if (me.mode === 'jet') gunHeld = true; else fireAction(); }); tap('actT', () => { if (me.mode === 'jet') fireMissile(); else interact(); });
+for (const ev of ['pointerup', 'pointercancel']) $('fireT').addEventListener(ev, () => { gunHeld = false; }); tap('waveT', wave); tap('cutT', cutGangplank);
+tap('jumpT', () => { if (me.mode === 'jet') eject(); else jump(); }); tap('diveT', sound);
 $('reelT').addEventListener('pointerdown', (e) => { e.preventDefault(); reelHeld = true; });
 $('reelT').addEventListener('pointerup', () => { reelHeld = false; });
 $('reelT').addEventListener('pointercancel', () => { reelHeld = false; });
@@ -475,6 +481,7 @@ function stickVec(): [number, number] {
 }
 
 function updateControls(dt: number) {
+  if (me.mode === 'jet') { updateJet(dt); return; }
   const sens = 0.0025;
   const [sx, sy] = stickVec();
   if (me.mode === 'harpoon') {
@@ -533,7 +540,7 @@ function updateControls(dt: number) {
 
 // ---------- Sword fighting ----------
 function playerWorld(p: Player): V3 | null {
-  if (p.on === -1) return [p.x, p.y, p.z];
+  if (p.on === -1 || p.on === JET_ON) return [p.x, p.y, p.z];
   if (p.on <= RIDE_BASE) { const m = rideMonster(RIDE_BASE - p.on); const f = m && rideFrame(m); return f ? f.pos : null; }
   const e = ships.get(p.on);
   if (!e) return null;
@@ -568,6 +575,7 @@ function takeDamage(dmg: number, why: string) {
 }
 function inBoarding(): boolean { return boards.some((b) => [b.a, b.b].includes(me.crew) || [b.a, b.b].includes(me.on)); }
 function revive() {
+  if (!crewShip()) { respawnJet('Back in the cockpit'); return; }
   me.hp = 100; me.mode = 'walk'; me.on = me.crew; me.x = -6; me.y = (Math.random() - 0.5) * 3; me.z = MAIN_DECK; me.pitch = 0;
   toast('Back on your feet', 2);
 }
@@ -674,6 +682,7 @@ function jump() {
   audio.whoosh(0);
 }
 function seaRescue(msg: string, dmg: number) {
+  if (!crewShip()) { respawnJet(msg.split('!')[0] + '! Back in the cockpit'); return; }
   const w = sampleWater(me.x, me.y, camSample).z;
   burst([me.x, me.y, w], 70, 6, 9, 1.2);
   audio.splash(0.9, 0);
@@ -706,6 +715,7 @@ function updateGlide(dt: number, mx: number, my: number) {
     if (dz > 0.4 || dz < -3) continue;
     const rel = Math.hypot(v[0] - e.ship.vx, v[1] - e.ship.vy, v[2] - e.ship.vz);
     me.mode = 'walk'; me.on = e.id;
+    if (!crewShip()) { me.crew = e.id; crewPanelKey = ''; } // an ejected pilot joins the crew whose deck they land on
     [me.x, me.y] = moveOnDeck(l[0], l[1], 0, 0); me.z = deckZ(me.x, me.y);
     me.yaw = me.yaw - e.ship.psi; me.pitch = 0;
     cam.shake = Math.max(cam.shake, Math.min(0.4, rel * 0.015));
@@ -890,6 +900,172 @@ function renderCave(vp: Mat4) {
   G.bindVertexArray(null);
 }
 
+// ---------- The F-15 ----------
+// A spawn choice: fly an F-15 Eagle over the sea. Guns and heat-seeking missiles against serpents,
+// the Leviathan and ships; crash and you are back in the air; eject and glide down onto a deck.
+const JET_ON = -2;
+const jet = new Jet();
+const jetProxy = new Ship(); // stands in for "my ship" (atmosphere, HUD, map) while flying
+let flyJet = false, gunHeld = false, gunCd = 0, missileCd = 0, jetDead = 0, jetCrash: V3 = [0, 0, 0];
+let lockT: { k: 'm' | 's'; id: number; name: string } | null = null;
+const JET_SPAWN = { x: 0, y: -2600, z: 450, yaw: Math.PI / 2 };
+function startJet() {
+  jet.place(JET_SPAWN.x + (R() - 0.5) * 400, JET_SPAWN.y + (R() - 0.5) * 300, JET_SPAWN.z, JET_SPAWN.yaw);
+  me.mode = 'jet'; me.on = JET_ON; me.hp = 100; jetDead = 0; gunHeld = false;
+  syncJet();
+}
+function takeOff() {
+  me.id = myId(); me.crew = 0; me.color = 0;
+  begin();
+  startJet();
+  if (WORLD_ROOM === 'WORLD1') history.replaceState(null, '', location.pathname);
+  toast('F-15 Eagle', 3);
+}
+function respawnJet(msg: string) { me.crew = 0; startJet(); toast(msg, 2.5); }
+function syncJet() {
+  const a = jet.angles(), v = jet.v;
+  me.x = jet.p[0]; me.y = jet.p[1]; me.z = jet.p[2]; me.yaw = a.yaw; me.pitch = a.pitch; me.jr = a.roll;
+  jetProxy.x = jet.p[0]; jetProxy.y = jet.p[1]; jetProxy.z = jet.p[2]; jetProxy.psi = a.yaw;
+  jetProxy.vx = v[0]; jetProxy.vy = v[1]; jetProxy.vz = v[2]; jetProxy.sail = Math.min(1, jet.thr); jetProxy.rudder = 0; jetProxy.hull = me.hp;
+}
+const jetStick = { x: 0, y: 0 };
+function updateJet(dt: number) {
+  // Mouse acts as a self-centring stick; keys and the touch stick add to it.
+  jetStick.x = clamp(jetStick.x * Math.exp(-dt * 3) + look.dx * 0.004, -1, 1);
+  jetStick.y = clamp(jetStick.y * Math.exp(-dt * 3) - look.dy * 0.004, -1, 1);
+  look.dx = look.dy = 0;
+  const [sx, sy] = stickVec();
+  const kx = (keys.has('d') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('a') || keys.has('ArrowLeft') ? 1 : 0);
+  const ky = (keys.has('s') || keys.has('ArrowDown') ? 1 : 0) - (keys.has('w') || keys.has('ArrowUp') ? 1 : 0);
+  const pitch = clamp(jetStick.y + ky - sy, -1, 1), roll = clamp(jetStick.x + kx + sx, -1, 1);
+  const yaw = (keys.has('e') ? 1 : 0) - (keys.has('q') ? 1 : 0);
+  jet.ab = keys.has('Shift') || reelHeld; jet.brake = keys.has('Control');
+  jet.thr = clamp(jet.thr + ((jet.ab ? 1 : 0.75) - jet.thr) * dt * 0.8, 0, 1);
+  jet.step(dt, pitch, roll, yaw);
+  syncJet();
+  // Spray thrown up when skimming the waves.
+  const w = sampleWater(jet.p[0], jet.p[1], camSample).z, alt = jet.p[2] - w;
+  if (alt < 30 && R() < dt * 60) emit([jet.p[0] - jet.F[0] * 12, jet.p[1] - jet.F[1] * 12, w + 0.5], [jet.v[0] * 0.3 + (R() - 0.5) * 8, jet.v[1] * 0.3 + (R() - 0.5) * 8, 6 + R() * 10 * (1 - alt / 30)], 1.2);
+  // Crashes: the sea, the island, a ship.
+  if (alt < 1.5) { crashJet('Splashed! Back in the air'); return; }
+  if (terrainHeight(jet.p[0], jet.p[1]) > jet.p[2] - 2) { crashJet('Into the cliffs! Back in the air'); return; }
+  for (const e of ships.values()) {
+    if (e.preview || e.cave) continue;
+    if (hullContains(toLocal(e, jet.p), 0.5)) { const p = jet.p.map((x) => +x.toFixed(1)) as V3; net.send({ t: 'ram', sid: e.id, p, boss: 0 }); onRamMsg(e.id, p, false); crashJet(`You flew into the ${e.name}!`); return; }
+  }
+  // The gun: a stream of tracers from the nose.
+  gunCd -= dt; missileCd -= dt;
+  if (gunHeld && gunCd <= 0) {
+    gunCd = 1 / 14;
+    const sp = 900, jit = () => (R() - 0.5) * 0.005;
+    const p: V3 = [jet.p[0] + jet.F[0] * 10, jet.p[1] + jet.F[1] * 10, jet.p[2] + jet.F[2] * 10];
+    const dir = gunLead(p, sp) ?? jet.F;
+    const v: V3 = [jet.v[0] + (dir[0] + jit()) * sp, jet.v[1] + (dir[1] + jit()) * sp, jet.v[2] + (dir[2] + jit()) * sp];
+    const id = myId() * 1000000 + shotCounter++;
+    spawnShot(id, -1, 'g', 0, p, v);
+    net.send({ t: 'shot', id, sid: -1, k: 'g', i: 0, p: p.map((x) => +x.toFixed(1)), v: v.map((x) => +x.toFixed(1)) });
+  }
+  lockT = findLock();
+}
+// Gun aim assist: with the locked target within ~4° of the nose, rounds lead it.
+function gunLead(p: V3, sp: number): V3 | null {
+  const t = lockT;
+  if (!t) return null;
+  let q: V3 | null = null, vx = 0, vy = 0;
+  if (t.k === 'm') { const m = monsters.list.find((x) => x.id === t.id); if (m?.segs[2]) { q = m.segs[2]; vx = m.vx; vy = m.vy; } }
+  else { const e = ships.get(t.id); if (e) { q = [e.ship.x, e.ship.y, e.ship.z + 3]; vx = e.ship.vx; vy = e.ship.vy; } }
+  if (!q) return null;
+  const d0 = dist3(q, p), tof = d0 / sp;
+  const lead: V3 = [q[0] + (vx - jet.v[0]) * tof, q[1] + (vy - jet.v[1]) * tof, q[2] - jet.v[2] * tof + 4.9 * tof * tof];
+  const dir = norm3(sub(lead, p));
+  return dir[0] * jet.F[0] + dir[1] * jet.F[1] + dir[2] * jet.F[2] > Math.cos(0.07) ? dir : null;
+}
+// The best target inside a 25° cone ahead, out to 3 km.
+function findLock(): { k: 'm' | 's'; id: number; name: string } | null {
+  let best: { k: 'm' | 's'; id: number; name: string } | null = null, ba = 0.44;
+  const look = (q: V3, k: 'm' | 's', id: number, name: string) => {
+    const d = sub(q, jet.p), l = Math.hypot(d[0], d[1], d[2]);
+    if (l > 3000 || l < 40) return;
+    const a = Math.acos(clamp((d[0] * jet.F[0] + d[1] * jet.F[1] + d[2] * jet.F[2]) / l, -1, 1));
+    if (a < ba) { ba = a; best = { k, id, name }; }
+  };
+  for (const m of monsters.list) if (m.st !== MS.Dying && m.segs[0]) look(m.segs[0], 'm', m.id, m.boss ? 'the Leviathan' : 'a serpent');
+  for (const e of ships.values()) if (!e.preview && !e.cave && e.id !== me.crew) look([e.ship.x, e.ship.y, e.ship.z + 4], 's', e.id, `the ${e.name}`);
+  return best;
+}
+function fireMissile() {
+  if (me.mode !== 'jet' || missileCd > 0) return;
+  missileCd = 2.5;
+  const t = lockT;
+  const p: V3 = [jet.p[0] - jet.U[0] * 1.5 + jet.F[0] * 2, jet.p[1] - jet.U[1] * 1.5 + jet.F[1] * 2, jet.p[2] - jet.U[2] * 1.5 + jet.F[2] * 2];
+  const v: V3 = [jet.v[0] + jet.F[0] * 40, jet.v[1] + jet.F[1] * 40, jet.v[2] + jet.F[2] * 40];
+  const id = myId() * 1000000 + shotCounter++;
+  spawnShot(id, -1, 'm', 0, p, v, t ? [t.k === 'm' ? 1 : 2, t.id] : null);
+  net.send({ t: 'shot', id, sid: -1, k: 'm', i: 0, p: p.map((x) => +x.toFixed(1)), v: v.map((x) => +x.toFixed(1)), tg: t ? [t.k === 'm' ? 1 : 2, t.id] : null });
+  toast(t ? `Fox two on ${t.name}!` : 'Fox two!', 1.5);
+}
+function crashJet(msg: string) {
+  jetCrash = [...jet.p] as V3;
+  explode(jetCrash, 1.4);
+  me.mode = 'down'; jetDead = 3; gunHeld = false;
+  toast(msg.split('!')[0] + '!', 2.5);
+  pendingJetMsg = 'Back in the air';
+}
+let pendingJetMsg = '';
+function updateJetDeath(dt: number) {
+  if (jetDead <= 0) return;
+  jetDead -= dt;
+  if (jetDead <= 0) respawnJet(pendingJetMsg);
+}
+function explode(p: V3, size: number) {
+  const d = dist3(p, cam.eye);
+  burst(p, Math.round(160 * size), 18 * size, 16 * size, 1.6);
+  audio.cannon(d); audio.crunch(Math.min(1, size) / (1 + d / 80)); audio.splash(0.8, d);
+  booms.push({ p: [...p] as V3, t: 0, s: size });
+  cam.shake = Math.max(cam.shake, 0.5 * size / (1 + d / 150));
+}
+const booms: { p: V3; t: number; s: number }[] = [];
+function eject() {
+  if (me.mode !== 'jet') return;
+  const v = jet.v, up = jet.U;
+  jetCrash = [...jet.p] as V3;
+  launch([jet.p[0] + up[0] * 3, jet.p[1] + up[1] * 3, jet.p[2] + up[2] * 3], [v[0] * 0.15 + up[0] * 12, v[1] * 0.15 + up[1] * 12, Math.max(v[2] * 0.15, 0) + up[2] * 12 + 4], me.yaw);
+  ejectedJet = { p: [...jet.p] as V3, v: [...v] as V3, F: [...jet.F] as V3, U: [...jet.U] as V3, t: 0 };
+  toast('Ejected! Glide down onto a deck', 2.5);
+  audio.cannon(0);
+}
+// The abandoned jet flies on a little, then falls into the sea.
+let ejectedJet: { p: V3; v: V3; F: V3; U: V3; t: number } | null = null;
+function updateEjected(dt: number) {
+  const j = ejectedJet;
+  if (!j) return;
+  j.t += dt; j.v[2] -= 9.81 * dt * 0.6;
+  for (let i = 0; i < 3; i++) j.p[i] += j.v[i] * dt;
+  if (j.p[2] < sampleWater(j.p[0], j.p[1], camSample).z + 1 || j.t > 30) { explode(j.p, 1.2); ejectedJet = null; }
+}
+function drawJetAt(p: V3, F: V3, U: V3) {
+  draw(jetMesh, fromAxes(F, cross(U, F), U, p));
+}
+function jetGlows() {
+  const flames = (p: V3, F: V3, U: V3, ab: boolean) => {
+    const R2 = norm3(cross(F, U));
+    for (const s of [1, -1]) {
+      const q: V3 = [p[0] - F[0] * 9.8 - R2[0] * 0.78 * s - U[0] * 0.15, p[1] - F[1] * 9.8 - R2[1] * 0.78 * s - U[1] * 0.15, p[2] - F[2] * 9.8 - R2[2] * 0.78 * s - U[2] * 0.15];
+      const d = dist3(q, cam.eye);
+      addGlow(q, (ab ? 1.5 : 0.8) + d * 0.003, ab ? [1, 0.55, 0.25] : [1, 0.45, 0.2], ab ? 1.1 : 0.55);
+      if (ab) addGlow([q[0] - F[0] * 2.5, q[1] - F[1] * 2.5, q[2] - F[2] * 2.5], 1.4 + d * 0.002, [0.6, 0.6, 1], 0.9);
+    }
+  };
+  if (me.mode === 'jet') flames(jet.p, jet.F, jet.U, jet.ab);
+  for (const o of others.values()) if (o.mode === 'jet') { const b = Jet.basis(o.yaw, o.pitch, o.jr); flames([o.x, o.y, o.z], b.F, b.U, o.moving); }
+  for (const b of booms) { const k = Math.max(0, 1 - b.t / 1.6); addGlow([b.p[0], b.p[1], b.p[2] + b.t * 8], (8 + b.t * 14) * b.s, [1, 0.5, 0.15], 2.2 * k); }
+}
+function jetAudio() {
+  let level = me.mode === 'jet' ? 0.9 : 0, thr = me.mode === 'jet' ? jet.thr + (jet.ab ? 0.4 : 0) : 0.6;
+  for (const o of others.values()) if (o.mode === 'jet') { const l = 1.2 / (1 + Math.hypot(o.x - cam.eye[0], o.y - cam.eye[1], o.z - cam.eye[2]) / 120); if (l > level) { level = l; thr = o.moving ? 1.3 : 0.8; } }
+  audio.setJet(level, thr);
+}
+
 // ---------- Camera ----------
 const cam = { eye: [0, 0, 5] as V3, fwd: [1, 0, 0] as V3, right: [0, -1, 0] as V3, up: [0, 0, 1] as V3, fov: 1.2, near: 0.25, shake: 0 };
 const camSample = newSample();
@@ -909,7 +1085,35 @@ function updateCamera(dt: number) {
   cam.shake *= Math.exp(-dt * 5);
   const jit = () => (Math.random() - 0.5) * cam.shake;
   const e = onShip();
-  document.body.classList.toggle('fp', playing && camView === 'fp' && (me.mode === 'walk' || me.mode === 'climb' || me.mode === 'nest' || me.mode === 'harpoon' || me.mode === 'glide' || me.mode === 'ride'));
+  document.body.classList.toggle('fp', playing && camView === 'fp' && (me.mode === 'walk' || me.mode === 'climb' || me.mode === 'nest' || me.mode === 'harpoon' || me.mode === 'glide' || me.mode === 'ride' || me.mode === 'jet'));
+  if (playing && me.mode === 'jet') {
+    const F = jet.F, U = jet.U;
+    const fov = (68 + Math.min(jet.sp, 400) * 0.03 + (jet.ab ? 4 : 0)) * Math.PI / 180;
+    if (camView === 'fp') {
+      const eye: V3 = [jet.p[0] + F[0] * 5.2 + U[0] * 1.35, jet.p[1] + F[1] * 5.2 + U[1] * 1.35, jet.p[2] + F[2] * 5.2 + U[2] * 1.35];
+      cam.eye = [eye[0] + jit() * 0.3, eye[1] + jit() * 0.3, eye[2] + jit() * 0.3]; cam.fwd = F; cam.right = norm3(cross(F, U)); cam.up = U;
+    } else {
+      // Chase: trail behind and above, keeping some of the bank so the turns read.
+      // Positioned relative to where the jet will be a moment from now, so speed doesn't open a gap.
+      const want: V3 = [jet.p[0] - F[0] * 21 + U[0] * 5, jet.p[1] - F[1] * 21 + U[1] * 5, jet.p[2] - F[2] * 21 + U[2] * 5];
+      const jv = jet.v, k = 1 - Math.exp(-dt * 7);
+      chase.pos = [chase.pos[0] + jv[0] * dt, chase.pos[1] + jv[1] * dt, chase.pos[2] + jv[2] * dt];
+      chase.pos = [chase.pos[0] + (want[0] - chase.pos[0]) * k, chase.pos[1] + (want[1] - chase.pos[1]) * k, chase.pos[2] + (want[2] - chase.pos[2]) * k];
+      if (dist3(chase.pos, jet.p) > 80) chase.pos = want;
+      keepAboveWater(chase.pos, 2);
+      const up = norm3([U[0] * 0.6, U[1] * 0.6, U[2] * 0.6 + 0.4]), fwd = norm3(sub([jet.p[0] + F[0] * 40, jet.p[1] + F[1] * 40, jet.p[2] + F[2] * 40], chase.pos));
+      cam.eye = [chase.pos[0] + jit(), chase.pos[1] + jit(), chase.pos[2] + jit()]; cam.fwd = fwd; cam.right = norm3(cross(fwd, up)); cam.up = cross(cam.right, fwd);
+    }
+    cam.fov = fov; cam.near = 0.5;
+    return;
+  }
+  if (playing && jetDead > 0) {
+    const a = time * 0.3;
+    cam.eye = [jetCrash[0] + Math.cos(a) * 60, jetCrash[1] + Math.sin(a) * 60, Math.max(jetCrash[2], 0) + 25];
+    keepAboveWater(cam.eye, 5);
+    setLook(undefined, cam.eye, sub(jetCrash, cam.eye), 1); cam.fov = 60 * Math.PI / 180; cam.near = 1;
+    return;
+  }
   if (playing && me.mode === 'glide') {
     const cp = Math.cos(me.pitch), dir: V3 = [Math.cos(me.yaw) * cp, Math.sin(me.yaw) * cp, Math.sin(me.pitch)];
     const sp = Math.hypot(me.gv[0], me.gv[1], me.gv[2]);
@@ -1010,8 +1214,8 @@ function updateSpray(dt: number) {
 }
 
 // ---------- Weapons ----------
-type ShotKind = 'c' | 'h' | 'f'; // cannonball, harpoon, fireball
-interface Shot { id: number; sid: number; kind: ShotKind; p: V3; v: V3; life: number; skips: number; }
+type ShotKind = 'c' | 'h' | 'f' | 'g' | 'm'; // cannonball, harpoon, fireball, jet gun round, missile
+interface Shot { id: number; sid: number; kind: ShotKind; p: V3; v: V3; life: number; skips: number; tg?: number[] | null; }
 const shots: Shot[] = [];
 let shotCounter = 1;
 const shotSample = newSample();
@@ -1076,10 +1280,12 @@ function hostFire(e: ShipEnt, kind: ShotKind, idx: number, ay: number, ap: numbe
   spawnShot(id, e.id, kind, idx, p, v);
   net.send({ t: 'shot', id, sid: e.id, k: kind, i: idx, p: p.map((x) => +x.toFixed(2)), v: v.map((x) => +x.toFixed(2)) });
 }
-function spawnShot(id: number, sid: number, kind: ShotKind, idx: number, p: V3, v: V3) {
-  shots.push({ id, sid, kind, p: [...p] as V3, v: [...v] as V3, life: 8, skips: 0 });
+function spawnShot(id: number, sid: number, kind: ShotKind, idx: number, p: V3, v: V3, tg: number[] | null = null) {
+  shots.push({ id, sid, kind, p: [...p] as V3, v: [...v] as V3, life: kind === 'g' ? 1.6 : kind === 'm' ? 12 : 8, skips: 0, tg });
   const e = ships.get(sid);
   const d = dist3(p, cam.eye);
+  if (kind === 'g') { audio.gun(d); return; }
+  if (kind === 'm') { audio.whoosh(d); audio.fireball(d * 2); return; }
   if (kind === 'c') {
     if (e) { e.recoil[idx] = 1; e.cannonCd[idx] = Math.max(e.cannonCd[idx], e.ghost ? 1.8 : 3); }
     audio.cannon(d);
@@ -1092,52 +1298,89 @@ function spawnShot(id: number, sid: number, kind: ShotKind, idx: number, p: V3, 
     for (let k = 0; k < 30; k++) emit([p[0], p[1], p[2]], [v[0] * 0.15 + (R() - 0.5) * 5, v[1] * 0.15 + (R() - 0.5) * 5, (R() - 0.2) * 4], 0.5);
   } else { if (e) e.harpoonCd = Math.max(e.harpoonCd, 3.5); audio.harpoon(d); }
 }
+// Missiles: accelerate to 380 m/s and turn toward their target (a serpent's head or a ship).
+const gunAcc = new Map<number, number>();
+function steerMissile(s: Shot, dt: number) {
+  let q: V3 | null = null;
+  if (s.tg) {
+    if (s.tg[0] === 1) { const m = monsters.list.find((x) => x.id === s.tg![1] && x.st !== MS.Dying); if (m?.segs[1]) q = m.segs[1]; }
+    else { const e = ships.get(s.tg[1]); if (e && !e.cave) q = [e.ship.x, e.ship.y, e.ship.z + 3]; }
+  }
+  const sp = Math.min(380, Math.hypot(s.v[0], s.v[1], s.v[2]) + 120 * dt);
+  let d = norm3(s.v);
+  if (q) {
+    const want = norm3(sub(q, s.p)), k = Math.min(1, 2.6 * dt);
+    d = norm3([d[0] + (want[0] - d[0]) * k, d[1] + (want[1] - d[1]) * k, d[2] + (want[2] - d[2]) * k]);
+  } else d = norm3([d[0], d[1], d[2] - 0.02 * dt]);
+  s.v = [d[0] * sp, d[1] * sp, d[2] * sp];
+  if (R() < dt * 50) emit([s.p[0] - d[0] * 2, s.p[1] - d[1] * 2, s.p[2] - d[2] * 2], [(R() - 0.5) * 2, (R() - 0.5) * 2, 1 + R()], 1.2);
+}
 function removeShot(id: number) { const s = shots.find((x) => x.id === id); if (s) s.life = 0; }
+function stepShot(s: Shot, dt: number) {
+  if (s.kind === 'm') steerMissile(s, dt); else s.v[2] -= 9.81 * dt;
+  s.p[0] += s.v[0] * dt; s.p[1] += s.v[1] * dt; s.p[2] += s.v[2] * dt;
+  s.life -= dt;
+  const w = sampleWater(s.p[0], s.p[1], shotSample).z;
+  // Serpents: the world host decides.
+  if (isWorldHost()) {
+    const m = monsters.hitTest(s.p, s.kind === 'h' ? 2.0 : s.kind === 'g' ? 1.2 : s.kind === 'm' ? 3.5 : 2.4) ?? (s.p[2] < w && s.kind !== 'g' ? monsters.hitTest([s.p[0], s.p[1], w], 4.5) : null);
+    if (m && s.kind === 'g') {
+      // Gun rounds chip away: every second hit costs the beast a point.
+      s.life = 0; burst(s.p, 6, 4, 3, 0.4);
+      const a = (gunAcc.get(m.id) ?? 0) + 0.5;
+      if (a >= 1) {
+        gunAcc.set(m.id, a - 1);
+        const killed = monsters.damage(m, 1);
+        const msg = { t: 'mhit', id: s.id, sid: s.sid, p: s.p.map((x) => +x.toFixed(1)), m: m.id, h: 0, k: killed ? 1 : 0, f: 0 };
+        net.send(msg); onMonsterHit(msg);
+      } else gunAcc.set(m.id, a);
+      return;
+    }
+    if (m) {
+      s.life = 0;
+      const shooterGhost = !!ships.get(s.sid)?.ghost;
+      const killed = s.kind === 'c' ? monsters.damage(m, shooterGhost ? 2 : 1) : s.kind === 'f' ? monsters.damage(m, 2) : s.kind === 'm' ? monsters.damage(m, 5) : false;
+      if (killed) creditKill(s.sid, m);
+      const msg = { t: 'mhit', id: s.id, sid: s.sid, p: s.p.map((x) => +x.toFixed(1)), m: m.id, h: s.kind === 'h' ? 1 : 0, k: killed ? 1 : 0, f: s.kind === 'f' ? 1 : 0, x: s.kind === 'm' ? 1 : 0 };
+      net.send(msg); onMonsterHit(msg);
+      return;
+    }
+  }
+  // Ships: each owner checks shots fired by other ships against its own hull.
+  for (const e of ships.values()) {
+    if (!owns(e) || e.id === s.sid || e.preview) continue;
+    const l = toLocal(e, s.p);
+    if (!hullContains(l, s.kind === 'm' ? 1 : 0.3)) continue;
+    s.life = 0;
+    if (s.kind === 'g') { e.ship.hull = Math.max(0, e.ship.hull - 1); burst(s.p, 8, 4, 3, 0.4); break; }
+    if (s.kind !== 'h') e.ship.hull = Math.max(0, e.ship.hull - (s.kind === 'm' ? 25 : s.kind === 'f' ? 10 : ships.get(s.sid)?.ghost ? 12 : 5));
+    const msg = { t: 'shit', id: s.id, sid: s.sid, tsid: e.id, p: s.p.map((x) => +x.toFixed(1)), l: l.map((x) => +x.toFixed(2)), k: s.kind };
+    net.send(msg); onShipHit(msg);
+    break;
+  }
+  if (s.life <= 0) return;
+  if (s.p[2] < w) {
+    const vh = Math.hypot(s.v[0], s.v[1]);
+    if (s.kind === 'c' && s.skips < 3 && vh > 30 && Math.abs(s.v[2]) < vh * 0.3) {
+      s.skips++; s.p[2] = w + 0.05; s.v[2] = Math.abs(s.v[2]) * 0.45 + 2.5; s.v[0] *= 0.8; s.v[1] *= 0.8;
+      burst([s.p[0], s.p[1], w], 18, 4, 7, 0.8);
+      audio.splash(0.35, dist3(s.p, cam.eye));
+      return;
+    }
+    s.life = 0;
+    if (s.kind === 'g') { if (R() < 0.5) burst([s.p[0], s.p[1], w], 5, 2, 6, 0.6); return; }
+    if (s.kind === 'm') { explode([s.p[0], s.p[1], w], 0.9); return; }
+    if (s.kind === 'f') addFire([s.p[0], s.p[1], w], s.sid);
+    burst([s.p[0], s.p[1], w], s.kind === 'c' ? 50 : 25, 5, 12, 1);
+    audio.splash(s.kind === 'c' ? 0.9 : 0.5, dist3(s.p, cam.eye));
+  }
+}
 function updateShots(dt: number) {
   for (const s of shots) {
     if (s.life <= 0) continue;
-    s.v[2] -= 9.81 * dt;
-    s.p[0] += s.v[0] * dt; s.p[1] += s.v[1] * dt; s.p[2] += s.v[2] * dt;
-    s.life -= dt;
-    const w = sampleWater(s.p[0], s.p[1], shotSample).z;
-    // Serpents: the world host decides.
-    if (isWorldHost()) {
-      const m = monsters.hitTest(s.p, s.kind === 'h' ? 2.0 : 2.4) ?? (s.p[2] < w ? monsters.hitTest([s.p[0], s.p[1], w], 4.5) : null);
-      if (m) {
-        s.life = 0;
-        const shooterGhost = !!ships.get(s.sid)?.ghost;
-        const killed = s.kind === 'c' ? monsters.damage(m, shooterGhost ? 2 : 1) : s.kind === 'f' ? monsters.damage(m, 2) : false;
-        if (killed) creditKill(s.sid, m);
-        const msg = { t: 'mhit', id: s.id, sid: s.sid, p: s.p.map((x) => +x.toFixed(1)), m: m.id, h: s.kind === 'h' ? 1 : 0, k: killed ? 1 : 0, f: s.kind === 'f' ? 1 : 0 };
-        net.send(msg); onMonsterHit(msg);
-        continue;
-      }
-    }
-    // Ships: each owner checks shots fired by other ships against its own hull.
-    for (const e of ships.values()) {
-      if (!owns(e) || e.id === s.sid || e.preview) continue;
-      const l = toLocal(e, s.p);
-      if (!hullContains(l, 0.3)) continue;
-      s.life = 0;
-      if (s.kind !== 'h') e.ship.hull = Math.max(0, e.ship.hull - (s.kind === 'f' ? 10 : ships.get(s.sid)?.ghost ? 12 : 5));
-      const msg = { t: 'shit', id: s.id, sid: s.sid, tsid: e.id, p: s.p.map((x) => +x.toFixed(1)), l: l.map((x) => +x.toFixed(2)), k: s.kind };
-      net.send(msg); onShipHit(msg);
-      break;
-    }
-    if (s.life <= 0) continue;
-    if (s.p[2] < w) {
-      const vh = Math.hypot(s.v[0], s.v[1]);
-      if (s.kind === 'c' && s.skips < 3 && vh > 30 && Math.abs(s.v[2]) < vh * 0.3) {
-        s.skips++; s.p[2] = w + 0.05; s.v[2] = Math.abs(s.v[2]) * 0.45 + 2.5; s.v[0] *= 0.8; s.v[1] *= 0.8;
-        burst([s.p[0], s.p[1], w], 18, 4, 7, 0.8);
-        audio.splash(0.35, dist3(s.p, cam.eye));
-        continue;
-      }
-      s.life = 0;
-      if (s.kind === 'f') addFire([s.p[0], s.p[1], w], s.sid);
-      burst([s.p[0], s.p[1], w], s.kind === 'c' ? 50 : 25, 5, 12, 1);
-      audio.splash(s.kind === 'c' ? 0.9 : 0.5, dist3(s.p, cam.eye));
-    }
+    // Gun rounds move ~15 m a frame: step them in short hops so they cannot skip through a target.
+    const n = s.kind === 'g' ? Math.min(8, Math.ceil(Math.hypot(s.v[0], s.v[1], s.v[2]) * dt / 5)) : 1;
+    for (let k = 0; k < n && s.life > 0; k++) stepShot(s, dt / n);
   }
   for (let i = shots.length - 1; i >= 0; i--) if (shots[i].life <= 0) shots.splice(i, 1);
   for (const e of ships.values()) {
@@ -1150,7 +1393,7 @@ function creditKill(sid: number, m: Monster) {
   const add = m.boss ? 10 : 1;
   if (e && owns(e)) e.score += add; else if (e) net.to(e.owner, { t: 'score', sid, add });
 }
-interface HitMsg { id: number; sid: number; p: number[]; m: number; h: number; k: number; f?: number; }
+interface HitMsg { id: number; sid: number; p: number[]; m: number; h: number; k: number; f?: number; x?: number; }
 function onMonsterHit(msg: HitMsg) {
   removeShot(msg.id);
   const p = msg.p as V3, d = dist3(p, cam.eye);
@@ -1158,6 +1401,7 @@ function onMonsterHit(msg: HitMsg) {
   audio.hit(d); audio.roar(d, true);
   burst(p, 60, 10, 10, 1.2);
   if (msg.f) addFire(p, msg.sid);
+  if (msg.x) explode(p, 1);
   if (msg.h) {
     const e = ships.get(msg.sid);
     if (e && owns(e) && !e.tether && m) {
@@ -1173,7 +1417,12 @@ function onShipHit(msg: ShipHitMsg) {
   const p = msg.p as V3, d = dist3(p, cam.eye);
   audio.crunch(0.7 / (1 + d / 60));
   burst(p, 40, 8, 8, 1);
-  if (msg.k === 'f') {
+  if (msg.k === 'm') {
+    explode(p, 1);
+    const mw = playerWorld(me);
+    if (mw && me.on === msg.tsid && dist3(mw, p) < 8) takeDamage(50, 'A missile tore through the deck');
+    if (me.on === msg.tsid) toast('Missile hit!', 2);
+  } else if (msg.k === 'f') {
     addFire(p, msg.sid);
     if (me.on === msg.tsid) { cam.shake = Math.max(cam.shake, 0.3); toast('She\'s burning!', 2); }
   } else if (msg.k === 'c') {
@@ -1573,6 +1822,13 @@ function drawMinimap() {
     mctx.beginPath(); mctx.moveTo(8 * dpr, 0); mctx.lineTo(-5 * dpr, 4.5 * dpr); mctx.lineTo(-3 * dpr, 0); mctx.lineTo(-5 * dpr, -4.5 * dpr); mctx.fill();
     mctx.restore();
   }
+  for (const p of [me, ...others.values()]) {
+    if (p.mode !== 'jet' || (p === me && !playing)) continue;
+    mctx.save(); mctx.translate(mx(p.x), my(p.y)); mctx.rotate(-p.yaw);
+    mctx.fillStyle = p === me ? '#e9b44c' : '#9fd0ff';
+    mctx.beginPath(); mctx.moveTo(7 * dpr, 0); mctx.lineTo(-4 * dpr, 6 * dpr); mctx.lineTo(-2 * dpr, 0); mctx.lineTo(-4 * dpr, -6 * dpr); mctx.fill();
+    mctx.restore();
+  }
   mctx.restore();
   mctx.strokeStyle = 'rgba(228,235,240,0.35)'; mctx.lineWidth = dpr;
   mctx.beginPath(); mctx.arc(cx, cy, rad, 0, Math.PI * 2); mctx.stroke();
@@ -1617,13 +1873,13 @@ function updateCrewPanel() {
 function updateHud(dt: number) {
   const f = focusShip(), e = onShip();
   const sp = Math.hypot(f.vx, f.vy);
-  knotsEl.textContent = (sp * 1.944).toFixed(0);
+  knotsEl.textContent = (me.mode === 'jet' ? jet.sp * 1.944 : sp * 1.944).toFixed(0);
   const hs = sigWaveHeight(f.x, f.y);
   const s = stormAt(f.x, f.y);
   const cat = s < 0.06 ? 0 : s < 0.28 ? 1 : s < 0.52 ? 2 : s < 0.78 ? 3 : 4;
   if (cat !== seaCand) { seaCand = cat; seaCandT = 0; } else seaCandT += dt;
   if (seaCand !== seaState && (seaCandT > 1.5 || seaState < 0)) { if (seaState >= 0 && playing) toast(SEA_STATES[seaCand]); seaState = seaCand; }
-  seaEl.innerHTML = inCave() ? 'The Leviathan\'s lair' : rogueAt(f.x, f.y) > 0.5 ? `The Rogue Sea · waves <b>${hs.toFixed(0)} m</b>` : `${SEA_STATES[Math.max(seaState, 0)]} · waves <b>${hs.toFixed(1)} m</b>`;
+  seaEl.innerHTML = me.mode === 'jet' ? `Altitude <b>${Math.round(jet.p[2])} m</b> · Mach ${(jet.sp / 340).toFixed(2)}` : inCave() ? 'The Leviathan\'s lair' : rogueAt(f.x, f.y) > 0.5 ? `The Rogue Sea · waves <b>${hs.toFixed(0)} m</b>` : `${SEA_STATES[Math.max(seaState, 0)]} · waves <b>${hs.toFixed(1)} m</b>`;
   leverFill.style.height = `${clamp(f.sail, 0, 1) * 100}%`;
   needle.style.left = `${50 - f.rudder * 45}%`;
   hullFill.style.width = `${f.hull}%`;
@@ -1650,6 +1906,10 @@ function updateHud(dt: number) {
   }
   if (me.mode === 'nest') msg = isTouch ? 'Use: back onto the mast' : '<kbd>E</kbd> back onto the mast';
   if (aloft()) msg += isTouch ? ' · Jump: glide' : ' · <kbd>J</kbd> jump and glide';
+  if (me.mode === 'jet') {
+    const lock = lockT ? ` · <b style="color:#e0624a">LOCK ${lockT.name}</b>` : '';
+    msg = (isTouch ? 'Stick: fly · Guns · Missile · Boost · Eject' : 'Mouse or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> fly · <kbd>Q</kbd>/<kbd>E</kbd> rudder · <kbd>Shift</kbd> afterburner · hold <kbd>Click</kbd> guns · <kbd>Right-click</kbd>/<kbd>R</kbd> missile · <kbd>J</kbd> eject') + lock;
+  }
   if (me.mode === 'glide') msg = isTouch ? 'Stick: dive, climb and turn · land on a deck or the Leviathan\'s head' : 'Mouse or <kbd>W</kbd>/<kbd>S</kbd> dive and climb · <kbd>A</kbd>/<kbd>D</kbd> turn · land on a deck or the Leviathan\'s head';
   if (me.mode === 'ride') {
     const h = me.hookMask, n = hookCount(h);
@@ -1675,6 +1935,12 @@ function updateHud(dt: number) {
   $('actT').textContent = me.mode === 'walk' ? ({ helm: 'Wheel', harpoon: 'Harpoon', climb: 'Climb', plank: 'Cross', board: 'Gangplank', cannon: 'Fire' } as Record<string, string>)[t?.kind ?? 'helm'] : me.mode === 'climb' ? (Math.abs(me.z - nestZ(me.mast)) < 1.2 ? 'Step off' : 'Down') : me.mode === 'nest' ? 'Mast' : riding ? 'Right hook' : 'Leave';
   $('reelT').style.display = me.mode === 'harpoon' && e?.tether ? 'block' : 'none';
   $('cutT').style.display = cut ? 'block' : 'none';
+  if (me.mode === 'jet') {
+    $('fireT').textContent = 'Guns'; $('fireT').style.display = 'block';
+    $('actT').textContent = missileCd > 0 ? '…' : 'Missile'; $('actT').style.display = 'block';
+    $('reelT').textContent = 'Boost'; $('reelT').style.display = 'block';
+    $('jumpT').textContent = 'Eject'; $('jumpT').style.display = 'block';
+  } else { $('reelT').textContent = 'Reel'; $('jumpT').textContent = 'Jump'; }
   if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) toastEl.classList.remove('show'); }
   if (playing) updateCrewPanel();
 }
@@ -1793,10 +2059,16 @@ function render() {
   for (const e of visible) drawShip(e);
   // Gliders and Leviathan riders live in world space.
   for (const p of [me, ...others.values()]) {
+    if (p.mode === 'jet') {
+      if (p === me) { if (playing && camView !== 'fp') drawJetAt(jet.p, jet.F, jet.U); }
+      else { const b = Jet.basis(p.yaw, p.pitch, p.jr); drawJetAt([p.x, p.y, p.z], b.F, b.U); }
+      continue;
+    }
     if (p.on >= 0 || (p.mode !== 'glide' && p.mode !== 'ride')) continue;
     if (p === me && (!playing || camView === 'fp')) continue;
     drawAvatar(p, IDENT);
   }
+  if (ejectedJet) drawJetAt(ejectedJet.p, ejectedJet.F, ejectedJet.U);
   for (const b of boards) {
     const ea = ships.get(b.a), eb = ships.get(b.b);
     if (!ea || !eb) continue;
@@ -1817,6 +2089,7 @@ function render() {
   for (const s of shots) {
     if (s.kind === 'f') draw(fireballMesh, TR(s.p[0], s.p[1], s.p[2]));
     else if (s.kind === 'c') draw(ballMesh, ships.get(s.sid)?.ghost ? mul(TR(s.p[0], s.p[1], s.p[2]), SC(1.5, 1.5, 1.5)) : TR(s.p[0], s.p[1], s.p[2]));
+    else if (s.kind === 'g') continue;
     else draw(boltMesh, mul(TR(s.p[0], s.p[1], s.p[2]), RZ(Math.atan2(s.v[1], s.v[0])), RYm(-Math.atan2(s.v[2], Math.hypot(s.v[0], s.v[1])))));
   }
 
@@ -1871,7 +2144,13 @@ function render() {
     for (const k of [1, -1]) addGlow([h[0] + (Math.cos(hd) * 2.3 - Math.sin(hd) * k * 0.95) * s, h[1] + (Math.sin(hd) * 2.3 + Math.cos(hd) * k * 0.95) * s, h[2] + 0.6 * s], 0.9 * s, [1, 0.85, 0.2], 0.9 + m.hurt);
   }
   drawFires();
-  for (const s of shots) if (s.kind === 'f') { const d = dist3(s.p, cam.eye); addGlow(s.p, 3.5 + d * 0.004, [1, 0.55, 0.15], 1.6); }
+  for (const s of shots) {
+    const d = dist3(s.p, cam.eye);
+    if (s.kind === 'f') addGlow(s.p, 3.5 + d * 0.004, [1, 0.55, 0.15], 1.6);
+    else if (s.kind === 'g') addGlow(s.p, 0.5 + d * 0.0025, [1, 0.85, 0.4], 1.2);
+    else if (s.kind === 'm') addGlow(s.p, 1.4 + d * 0.003, [1, 0.7, 0.35], 1.5);
+  }
+  jetGlows();
   if (glowCount) {
     pGlow.use().m4('uVP', vp).v3('uCamRight', cam.right).v3('uCamUp', cam.up);
     G.bindVertexArray(glowBuf.vao); G.bindBuffer(G.ARRAY_BUFFER, glowBuf.buf);
@@ -1958,7 +2237,7 @@ net.onMsg = (m: NetMsg) => {
       if (!o) { o = newPlayer(from, String(m.n), Number(m.c)); others.set(from, o); if (playing && m.cr === me.crew) toast(`${o.name} came aboard`, 2.5); }
       o.name = String(m.n); o.color = Number(m.c); o.crew = m.cr as number; o.hp = m.hp as number; o.seen = now();
       const prevMode = o.mode;
-      o.mode = m.md as Mode; o.moving = !!m.mv; o.reel = !!m.rl; o.mast = (m.ms as number) ?? 0; o.hookMask = (m.hk as number) ?? 0;
+      o.mode = m.md as Mode; o.moving = !!m.mv; o.reel = !!m.rl; o.mast = (m.ms as number) ?? 0; o.hookMask = (m.hk as number) ?? 0; o.jr = (m.jr as number) ?? 0;
       if (o.snaps.length && o.snaps[o.snaps.length - 1].on !== m.on) o.snaps = [];
       o.snaps.push({ t: now(), x: m.x as number, y: m.y as number, z: m.z as number, yaw: m.yw as number, pitch: m.pt as number, ay: m.ay as number, ap: m.ap as number, on: m.on as number });
       if (o.snaps.length > 8) o.snaps.shift();
@@ -2000,7 +2279,7 @@ net.onMsg = (m: NetMsg) => {
     case 'in': { const e = ships.get(m.sid as number); if (e && owns(e) && e.helm === from) e.remote = { rudder: m.r as number, sail: m.s as number }; break; }
     case 'fire': { const e = ships.get(m.sid as number); if (e && owns(e)) hostFire(e, m.k as ShotKind, m.i as number, m.ay as number, m.ap as number); break; }
     case 'unhook': { const e = ships.get(m.sid as number); if (e && owns(e)) releaseTether(e, true); break; }
-    case 'shot': if (!shots.some((s) => s.id === m.id)) spawnShot(m.id as number, m.sid as number, m.k as ShotKind, m.i as number, m.p as V3, m.v as V3); break;
+    case 'shot': if (!shots.some((s) => s.id === m.id)) spawnShot(m.id as number, m.sid as number, m.k as ShotKind, m.i as number, m.p as V3, m.v as V3, (m.tg as number[] | null) ?? null); break;
     case 'mhit': onMonsterHit(m as unknown as HitMsg); break;
     case 'shit': onShipHit(m as unknown as ShipHitMsg); break;
     case 'rip': onRip(m as unknown as RipMsg); break;
@@ -2044,7 +2323,7 @@ function netSend(dt: number) {
   sendT += dt; shipT += dt; monT += dt;
   if (playing && sendT > 1 / 15) {
     sendT = 0;
-    net.send({ t: 'p', n: me.name, c: me.color, cr: me.crew, on: me.on, x: +me.x.toFixed(2), y: +me.y.toFixed(2), z: +me.z.toFixed(2), yw: +me.yaw.toFixed(3), pt: +me.pitch.toFixed(3), md: me.mode, mv: me.moving ? 1 : 0, wv: me.wave > 1.5 ? 1 : 0, sw: me.swing > 0 && me.swing < 0.2 ? 1 : 0, ay: +me.aimYaw.toFixed(3), ap: +me.aimPitch.toFixed(3), hp: Math.round(me.hp), rl: me.reel ? 1 : 0, ms: me.mast, hk: me.hookMask });
+    net.send({ t: 'p', n: me.name, c: me.color, cr: me.crew, on: me.on, x: +me.x.toFixed(2), y: +me.y.toFixed(2), z: +me.z.toFixed(2), yw: +me.yaw.toFixed(3), pt: +me.pitch.toFixed(3), md: me.mode, mv: (me.mode === 'jet' ? jet.ab : me.moving) ? 1 : 0, wv: me.wave > 1.5 ? 1 : 0, sw: me.swing > 0 && me.swing < 0.2 ? 1 : 0, ay: +me.aimYaw.toFixed(3), ap: +me.aimPitch.toFixed(3), hp: Math.round(me.hp), rl: me.reel ? 1 : 0, ms: me.mast, hk: me.hookMask, jr: +me.jr.toFixed(3) });
     const e = onShip();
     if (e && !owns(e) && me.mode === 'helm') net.to(e.owner, { t: 'in', sid: e.id, r: +helmRudder.toFixed(3), s: +helmSail.toFixed(3) });
   }
@@ -2191,8 +2470,11 @@ function simulate(dt: number) {
   updateBoardsAndCollisions(dt);
   if (isWorldHost()) {
     const refs = [...ships.values()].filter((e) => !e.preview).map((e) => ({ id: e.id, x: e.ship.x, y: e.ship.y, psi: e.ship.psi, vx: e.ship.vx, vy: e.ship.vy }));
+    // Jets draw the serpents and the Leviathan up too (negative ids: they can't be rammed).
+    for (const p of [me, ...others.values()]) if (p.mode === 'jet' && (p !== me || playing)) refs.push({ id: -1000 - p.id, x: p.x, y: p.y, psi: p.yaw, vx: 0, vy: 0 });
     monsters.update(dt, refs, stormAt, time, {
-      ram: (m, sid) => { const p = (m.segs[0] ?? [m.x, m.y, 0]).map((x) => +x.toFixed(1)) as V3; net.send({ t: 'ram', sid, p, boss: m.boss ? 1 : 0 }); onRamMsg(sid, p, m.boss); },
+      ram: (m, sid) => {
+        if (sid < 0) return; const p = (m.segs[0] ?? [m.x, m.y, 0]).map((x) => +x.toFixed(1)) as V3; net.send({ t: 'ram', sid, p, boss: m.boss ? 1 : 0 }); onRamMsg(sid, p, m.boss); },
       bossSpawn: () => { net.send({ t: 'boss' }); toast('The Leviathan rises!', 4); },
     });
   } else if (monsterRows) monsters.apply(monsterRows, dt, time, monsterTm);
@@ -2204,6 +2486,9 @@ function simulate(dt: number) {
   }
   updateShots(dt);
   updateFires(dt);
+  updateJetDeath(dt); updateEjected(dt);
+  for (const b of booms) b.t += dt;
+  for (let i = booms.length - 1; i >= 0; i--) if (booms[i].t > 1.6) booms.splice(i, 1);
   interpOthers();
   updateAtmosphere(dt);
   updateLightning(dt);
@@ -2240,7 +2525,8 @@ function frame(nowMs: number) {
   updateHud(dt);
   netSend(dt);
   const f = focusShip();
-  audio.update({ speed: me.mode === 'glide' ? Math.min(Math.hypot(me.gv[0], me.gv[1], me.gv[2]) / 25, 1) : Math.min(Math.hypot(f.vx, f.vy) / 8, 1), storm: 0.15 + 0.85 * atm.s, rain: atm.rain, wind: atm.wind, heave: Math.abs(f.vz), roll: Math.abs(f.phv) }, dt);
+  jetAudio();
+  audio.update({ speed: me.mode === 'jet' ? 0.6 : me.mode === 'glide' ? Math.min(Math.hypot(me.gv[0], me.gv[1], me.gv[2]) / 25, 1) : Math.min(Math.hypot(f.vx, f.vy) / 8, 1), storm: 0.15 + 0.85 * atm.s, rain: atm.rain, wind: atm.wind, heave: Math.abs(f.vz), roll: Math.abs(f.phv) }, dt);
   if (!playing) updateLobby();
   requestAnimationFrame(frame);
 }
@@ -2254,10 +2540,14 @@ try { savedName = localStorage.getItem('seas-name') ?? ''; } catch { /* storage 
 nameEl.value = savedName || `${PIRATE[Math.floor(R() * PIRATE.length)]} ${NAMES[Math.floor(R() * NAMES.length)]}`;
 const inviteShip = Number(new URLSearchParams(location.search).get('ship') ?? 0);
 let spawnMode: SpawnMode = 'shelter';
-const setSpawn = (m: SpawnMode) => { spawnMode = m; $('spShelter').classList.toggle('on', m === 'shelter'); $('spStorm').classList.toggle('on', m === 'storm'); $('spRogue').classList.toggle('on', m === 'rogue'); };
+const setSpawn = (m: SpawnMode | 'jet') => {
+  flyJet = m === 'jet'; $('spJet').classList.toggle('on', flyJet); $('soloBtn').textContent = flyJet ? 'Take off' : 'Sail my own ship';
+  if (m === 'jet') { for (const id of ['spShelter', 'spStorm', 'spRogue']) $(id).classList.remove('on'); return; }
+  spawnMode = m; $('spShelter').classList.toggle('on', m === 'shelter'); $('spStorm').classList.toggle('on', m === 'storm'); $('spRogue').classList.toggle('on', m === 'rogue'); };
 $('spShelter').addEventListener('click', () => setSpawn('shelter'));
 $('spStorm').addEventListener('click', () => setSpawn('storm'));
 $('spRogue').addEventListener('click', () => setSpawn('rogue'));
+$('spJet').addEventListener('click', () => setSpawn('jet'));
 const statusEl = $('status'), crewsEl = $('crews');
 let lobbyKey = '', lobbyT = 0;
 function updateLobby() {
@@ -2291,6 +2581,7 @@ function begin() {
   if (!isTouch) lockPointer();
 }
 function sailOwn() {
+  if (flyJet) { takeOff(); return; }
   me.id = myId();
   const e = newShipEnt(me.id, me.id, shipName(me.id), (nameEl.value.trim() || 'Pirate').slice(0, 18));
   ships.set(e.id, e);
@@ -2344,7 +2635,7 @@ dev.__advance = (n: number, dt = 1 / 60) => {
   render(); updateTags(); updateHud(0);
 };
 dev.__game = {
-  get boards() { return boards; }, enterLair, sound, jump, fires, addFire, surge, ships, me, others, monsters, keys, cam, atm, net, shots, sailOwn, joinCrew, interact, fireAction, toggleCam, wave, slash, cutGangplank,
+  get boards() { return boards; }, jet, fireMissile, eject, get lock() { return lockT; }, setGun: (v: boolean) => { gunHeld = v; }, enterLair, sound, jump, fires, addFire, surge, ships, me, others, monsters, keys, cam, atm, net, shots, sailOwn, joinCrew, interact, fireAction, toggleCam, wave, slash, cutGangplank,
   setSpawn, look: (dx: number, dy: number) => { look.dx += dx; look.dy += dy; }, reel: (v: boolean) => { reelHeld = v; },
   ship: () => onShip(), place: (mode: SpawnMode) => { const e = crewShip(); if (e) placeShip(e, mode, false); },
 };

@@ -35,6 +35,7 @@ export class SeaAudio {
   private boss = 0; private bossTarget = 0;
   private nextBeat = 0; private beat = 0; private nextChoir = 0; private nextBrass = 0;
   private reelG: GainNode | null = null; private reelF: BiquadFilterNode | null = null;
+  private jet: { g: GainNode; f: BiquadFilterNode; o: OscillatorNode; og: GainNode } | null = null;
   muted = false;
 
   get started() { return this.ctx !== null; }
@@ -222,6 +223,13 @@ export class SeaAudio {
     this.burst(this.white, 'highpass', 1500 + Math.random() * 2500, 0.8, 0.25 * i, 0.002, 0.05 + Math.random() * 0.08, Math.random() * 0.2, 0.2);
     if (Math.random() < 0.4) this.burst(this.brown, 'lowpass', 220, 0.7, 0.35 * i, 0.08, 0.6, 0, 0.3);
   }
+  // One round of the F-15's rotary cannon (they run together into a brrrt).
+  gun(dist: number) {
+    if (!this.ctx) return;
+    const v = vol(dist, 80);
+    this.burst(this.white, 'bandpass', 900, 0.9, 0.35 * v, 0.001, 0.06, 0, 0.15);
+    this.burst(this.brown, 'lowpass', 200, 0.8, 0.3 * v, 0.002, 0.08, 0, 0.1);
+  }
   fireball(dist: number) {
     if (!this.ctx) return;
     const v = vol(dist, 60);
@@ -393,6 +401,29 @@ export class SeaAudio {
     this.burst(this.brown, 'lowpass', 180, 1, 0.8 * v, 0.005, 0.5);
   }
   // Ratcheting winch while reeling the harpoon line in.
+  // Jet engines: a roaring noise bed and a turbine whine. level = loudness (1 in the cockpit, less
+  // for a passing jet), thr = throttle 0..1 (above 1 with afterburner).
+  setJet(level: number, thr: number) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    if (!this.jet) {
+      const s = ctx.createBufferSource(); s.buffer = this.brown; s.loop = true;
+      const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 600; f.Q.value = 0.8;
+      const g = ctx.createGain(); g.gain.value = 0;
+      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 90;
+      const of = ctx.createBiquadFilter(); of.type = 'bandpass'; of.frequency.value = 1800; of.Q.value = 2;
+      const og = ctx.createGain(); og.gain.value = 0;
+      s.connect(f); f.connect(g); g.connect(this.master);
+      o.connect(of); of.connect(og); og.connect(this.master);
+      s.start(); o.start();
+      this.jet = { g, f, o, og };
+    }
+    const t = ctx.currentTime, j = this.jet;
+    j.g.gain.setTargetAtTime(level * (0.35 + 0.45 * thr), t, 0.15);
+    j.f.frequency.setTargetAtTime(350 + 1500 * Math.min(thr, 1.4), t, 0.2);
+    j.o.frequency.setTargetAtTime(70 + 110 * thr, t, 0.3);
+    j.og.gain.setTargetAtTime(level * 0.05 * Math.min(thr, 1), t, 0.2);
+  }
   reel(on: boolean) {
     if (!this.ctx) return;
     if (!this.reelG) {
