@@ -5,7 +5,7 @@ import { uWA, uWB, updatePhases, sampleWater, newSample, sigWaveHeight } from '.
 import { buildLand, buildShoreMap, buildBuoy, PILLARS, ARCH, LIGHTHOUSE, BUOYS, SHORE, BUOY_COLS } from './island';
 import {
   Ship, shipAxes, buildShipMesh, buildSailMesh, buildCannonMesh, buildHarpoonMesh, buildBoltMesh, buildBallMesh, buildWheelMesh,
-  MASTS, CANNONS, HELM, HARPOON, deckZ, moveOnDeck, halfBeam, climbX, climbTop, nestZ, moveOnNest, railPoint, hullContains, HULL_CIRCLES, MAIN_DECK,
+  ShipEvent, MASTS, CANNONS, HELM, HARPOON, deckZ, moveOnDeck, halfBeam, climbX, climbTop, nestZ, moveOnNest, railPoint, hullContains, HULL_CIRCLES, MAIN_DECK,
 } from './ship';
 import { buildAvatarParts, avatarPose, RZ, TR, AvatarParts } from './avatar';
 import { MonsterSystem, Monster, MS, segRadius, buildSegmentMesh, buildHeadMesh, BOSS_POS } from './monsters';
@@ -147,7 +147,7 @@ const beam = (() => {
 })();
 const glowBuf = vao([3, 3, 4], null);
 const boltBuf = vao([3, 1], null);
-const MAXP = isMobile ? 700 : 1400;
+const MAXP = isMobile ? 1300 : 2600;
 const sprayPos = new Float32Array(MAXP * 4), sprayVel = new Float32Array(MAXP * 3);
 const sprayBuf = vao([4], sprayPos, G.DYNAMIC_DRAW);
 const rainVao = G.createVertexArray()!;
@@ -198,7 +198,8 @@ const angLerp = (a: number, b: number, t: number) => a + Math.atan2(Math.sin(b -
 const audio = new SeaAudio();
 const net = new Net();
 const monsters = new MonsterSystem();
-const WORLD_ROOM = 'WORLD1';
+// One shared world; ?room=CODE opens a separate one (used for testing).
+const WORLD_ROOM = (/^[A-Z0-9]{4,8}$/.exec((new URLSearchParams(location.search).get('room') ?? '').toUpperCase()) ?? ['WORLD1'])[0];
 const SHIP_NAMES = ['The Black Gull', 'Sea Wraith', 'Grey Widow', 'Salt Revenant', 'Iron Kraken', 'Crimson Tide', 'Drowned Lantern', 'Storm Jackal', 'Bone Mermaid', 'Rusty Cutlass'];
 interface Tether { kind: 'm' | 's'; target: number; len: number; t0: number; ap: V3; }
 interface ShipEnt {
@@ -461,7 +462,7 @@ function updateControls(dt: number) {
     const c = Math.cos(me.yaw), s = Math.sin(me.yaw);
     const fx = c * my + s * mx, fy = s * my - c * mx, len = Math.hypot(fx, fy);
     const slideX = -Math.sin(e.ship.th) * 2.2, slideY = -Math.sin(e.ship.ph) * 2.2;
-    const vx = (len > 0.01 ? fx / Math.max(len, 1) * run : 0) + slideX, vy = (len > 0.01 ? fy / Math.max(len, 1) * run : 0) + slideY;
+    const vx = (len > 0.01 ? fx / Math.max(len, 1) * run : 0) + slideX + stagger.x, vy = (len > 0.01 ? fy / Math.max(len, 1) * run : 0) + slideY + stagger.y;
     [me.x, me.y] = moveOnDeck(me.x, me.y, vx * dt, vy * dt);
     me.z = deckZ(me.x, me.y);
     me.moving = len > 0.05;
@@ -472,7 +473,7 @@ function updateControls(dt: number) {
     const run = 2.4, c = Math.cos(me.yaw), s = Math.sin(me.yaw);
     const fx = c * my + s * mx, fy = s * my - c * mx, len = Math.hypot(fx, fy);
     const sway = 2.4 * (me.z / 20);
-    const vx = (len > 0.01 ? fx / Math.max(len, 1) * run : 0) - Math.sin(e.ship.th) * sway, vy = (len > 0.01 ? fy / Math.max(len, 1) * run : 0) - Math.sin(e.ship.ph) * sway;
+    const vx = (len > 0.01 ? fx / Math.max(len, 1) * run : 0) - Math.sin(e.ship.th) * sway + stagger.x * 0.5, vy = (len > 0.01 ? fy / Math.max(len, 1) * run : 0) - Math.sin(e.ship.ph) * sway;
     [me.x, me.y] = moveOnNest(me.mast, me.x, me.y, vx * dt, vy * dt);
     me.z = nestZ(me.mast);
     me.moving = len > 0.05;
@@ -1193,7 +1194,7 @@ function updateCrewPanel() {
   if (net.online && e) rows.push(`<button id="invite">Copy invite link</button>`);
   crewEl.innerHTML = rows.join('');
   const inv = document.getElementById('invite');
-  if (inv) inv.onclick = () => { void navigator.clipboard?.writeText(`${location.origin}${location.pathname}?ship=${me.crew}`).then(() => toast('Invite link copied', 2)); };
+  if (inv) inv.onclick = () => { void navigator.clipboard?.writeText(`${location.origin}${location.pathname}?ship=${me.crew}${WORLD_ROOM === 'WORLD1' ? '' : `&room=${WORLD_ROOM}`}`).then(() => toast('Invite link copied', 2)); };
 }
 
 function updateHud(dt: number) {
@@ -1527,7 +1528,7 @@ net.onMsg = (m: NetMsg) => {
       if (net.role === 'guest') {
         const off = (m.tm as number) - now();
         clockOffset = clockOffset === null ? off : clockOffset + (off - clockOffset) * 0.05;
-        monsterRows = m.mo as number[][];
+        monsterRows = m.mo as number[][]; monsterTm = m.tm as number;
       }
       break;
     }
@@ -1545,11 +1546,12 @@ net.onMsg = (m: NetMsg) => {
     case 'board': cutAt.delete(pairKey(m.a as number, m.b as number)); if (!boards.some((b) => b.a === m.a && b.b === m.b)) { boards.push({ a: m.a as number, b: m.b as number, pa: m.pa as [number, number], pb: m.pb as [number, number] }); if ([m.a, m.b].includes(me.on)) toast('Grappled! Prepare to be boarded', 2.5); } break;
     case 'unboard': onUnboard(m.a as number, m.b as number); break;
     case 'slash': { audio.cut(0); takeDamage(m.dmg as number, `${others.get(from)?.name ?? 'A pirate'} cut you down`); break; }
+    case 'ev': { const e = ships.get(m.sid as number); if (e && !owns(e)) e.ship.events.push({ type: m.k as ShipEvent['type'], i: m.i as number }); break; }
     case 'wreck': if ((m.sid as number) === me.on) showWreck(); break;
     case 'boss': toast('The Leviathan rises!', 4); break;
   }
 };
-let monsterRows: number[][] | null = null;
+let monsterRows: number[][] | null = null, monsterTm = 0;
 function interpOthers() {
   const t = now() - 0.12;
   for (const o of others.values()) {
@@ -1601,17 +1603,61 @@ function onRamMsg(sid: number, p: V3, boss: boolean) {
 
 // ---------- Game step ----------
 function handleShipEvents(e: ShipEnt) {
+  // The owner's simulation produces the events; share them so the whole crew feels them.
+  if (owns(e) && !e.preview && net.online) for (const ev of e.ship.events) net.send({ t: 'ev', sid: e.id, k: ev.type, i: +ev.i.toFixed(2) });
   for (const ev of e.ship.events) {
     const d = dist3([e.ship.x, e.ship.y, e.ship.z], cam.eye);
     if (ev.type === 'slam') {
       if (d < 400) audio.slap(ev.i / (1 + d / 80));
       if (me.on === e.id) { cam.shake = Math.max(cam.shake, 0.06 * ev.i); wakeBlob = 0.5 * ev.i; }
       if (d < 600) for (let k = 0; k < 40 + 120 * ev.i; k++) emitLocal(e, [15 + R() * 3, (R() - 0.5) * 6, 3 + R()], [-(1 + R() * 6 * ev.i), (R() - 0.5) * (6 + 10 * ev.i), 4 + R() * (6 + 12 * ev.i)], 1.2);
+    } else if (ev.type === 'splash') {
+      splashDown(e, ev.i, d);
     } else if (ev.type === 'green') {
       if (d < 600) for (let k = 0; k < 120 * ev.i; k++) emitLocal(e, [8 + R() * 8, (R() - 0.5) * 7, 5 + R() * 2], [-(5 + R() * 6), (R() - 0.5) * 4, 2 + R() * 4], 1.2);
     } else { audio.crunch(ev.i / (1 + d / 60)); if (me.on === e.id) { cam.shake = Math.max(cam.shake, 0.3 * ev.i); toast('Collision!', 1.5); } }
   }
   e.ship.events.length = 0;
+}
+
+// ---------- Splash-down ----------
+const splash = { t: 99, i: 0, on: -1 };
+const stagger = { x: 0, y: 0 };
+const drenchEl = $('drench');
+function splashDown(e: ShipEnt, i: number, d: number) {
+  if (d < 500) audio.splashdown(i / (1 + d / 120));
+  if (d < 700) {
+    // White sheets thrown out from both sides of the hull, a wall at the bow and water sluicing aft.
+    for (const sd of [1, -1]) for (let k = 0; k < 220 * i; k++) {
+      const x = -6 + R() * 23;
+      emitLocal(e, [x, sd * (halfBeam(x) + 0.3), 0.6 + R()], [-(1 + R() * 4), sd * (5 + R() * 11 * i), 6 + R() * 14 * i], 1.6);
+    }
+    for (let k = 0; k < 160 * i; k++) emitLocal(e, [16 + R() * 3, (R() - 0.5) * 5, 1.5 + R() * 2], [2 + R() * 4, (R() - 0.5) * 12 * i, 12 + R() * 14 * i], 1.8);
+    for (let k = 0; k < 140 * i; k++) emitLocal(e, [7 + R() * 9, (R() - 0.5) * 7, MAIN_DECK + 0.6 + R() * 1.5], [-(6 + R() * 6), (R() - 0.5) * 3, 1 + R() * 3], 1.2);
+  }
+  if (me.on !== e.id) return;
+  wakeBlob = Math.max(wakeBlob, i);
+  cam.shake = Math.max(cam.shake, 0.35 * i);
+  splash.t = 0; splash.i = i; splash.on = e.id;
+  // Crew are thrown forward; anyone aloft loses their footing.
+  stagger.x = 3.5 * i; stagger.y = (R() - 0.5) * 2 * i;
+  if (me.mode === 'climb' && i > 0.6) me.z = Math.max(MASTS[me.mast].base, me.z - 2.5 * i);
+  if (i > 0.75 && (me.mode === 'walk' || me.mode === 'nest')) toast('Brace!', 1.2);
+}
+function updateSplashCam(dt: number) {
+  splash.t += dt;
+  stagger.x *= Math.exp(-dt * 3); stagger.y *= Math.exp(-dt * 3);
+  const t = splash.t, i = splash.i, live = playing && splash.on === me.on && t < 6;
+  if (live) {
+    // The deck drops away under you and bounces back.
+    const dip = -i * 0.9 * Math.exp(-t * 3.2) * Math.cos(t * 7);
+    cam.eye = [cam.eye[0] + cam.up[0] * dip, cam.eye[1] + cam.up[1] * dip, cam.eye[2] + cam.up[2] * dip];
+    cam.fov += i * 0.08 * Math.exp(-t * 4);
+  }
+  const close = live && !(me.mode === 'helm' && camView === 'tp');
+  const w = close ? i * Math.min(1, t * 6) * Math.exp(-t * 0.7) : 0;
+  drenchEl.style.opacity = w.toFixed(3);
+  drenchEl.style.display = w > 0.01 ? 'block' : 'none';
 }
 
 function stepOwnedShip(e: ShipEnt, dt: number) {
@@ -1647,7 +1693,7 @@ function simulate(dt: number) {
       ram: (m, sid) => { const p = (m.segs[0] ?? [m.x, m.y, 0]).map((x) => +x.toFixed(1)) as V3; net.send({ t: 'ram', sid, p, boss: m.boss ? 1 : 0 }); onRamMsg(sid, p, m.boss); },
       bossSpawn: () => { net.send({ t: 'boss' }); toast('The Leviathan rises!', 4); },
     });
-  } else if (monsterRows) monsters.apply(monsterRows, dt, time);
+  } else if (monsterRows) monsters.apply(monsterRows, dt, time, monsterTm);
   trackMonsterDeaths();
   for (const e of ships.values()) {
     if (Math.hypot(e.ship.x - cam.eye[0], e.ship.y - cam.eye[1]) > 400) continue;
@@ -1662,6 +1708,7 @@ function simulate(dt: number) {
   updateSpray(dt);
   updateWake();
   updateCamera(dt);
+  updateSplashCam(dt);
   if (playing) checkGates();
   // Boss music when the Leviathan is near my ship.
   const f = focusShip();
@@ -1746,7 +1793,7 @@ function sailOwn() {
   placeShip(e, spawnMode, true);
   me.crew = me.on = e.id; me.color = 0; me.x = -7; me.y = -1.2;
   begin();
-  history.replaceState(null, '', location.pathname);
+  if (WORLD_ROOM === 'WORLD1') history.replaceState(null, '', location.pathname);
   toast(spawnMode === 'storm' ? 'High seas' : 'Sheltered water', 3);
 }
 function joinCrew(sid: number) {
@@ -1789,6 +1836,7 @@ requestAnimationFrame(frame);
 const dev = window as unknown as Record<string, unknown>;
 dev.__advance = (n: number, dt = 1 / 60) => {
   for (let i = 0; i < n; i++) { simulate(dt); netSend(dt); }
+  last = performance.now(); // keep the hidden-tab timer from also stepping
   render(); updateTags(); updateHud(0);
 };
 dev.__game = {

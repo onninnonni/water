@@ -201,6 +201,15 @@ export class SeaAudio {
     this.burst(this.white, 'highpass', 2200, 0.5, 0.12 * i, 0.06, 0.9 + i, 0.1);
     this.creak(0.6 + 0.4 * i);
   }
+  // The hull landing in a trough after a big wave: a deep boom, a roar of water, then the hiss.
+  splashdown(i: number) {
+    if (!this.ctx) return;
+    this.tone('sine', 62, 28, 1.1 * i, 1.4, 0, 0.6);
+    this.burst(this.brown, 'lowpass', 140, 0.8, 1.6 * i, 0.006, 1.3, 0, 0.7);
+    this.burst(this.white, 'bandpass', 520, 0.7, 0.9 * i, 0.02, 1.6, 0.03, 0.6);
+    this.burst(this.white, 'highpass', 1800, 0.4, 0.35 * i, 0.25, 2.6, 0.15, 0.5);
+    this.creak(1); this.groan(0.6 + 0.4 * i);
+  }
   crunch(i: number) {
     if (!this.ctx) return;
     this.burst(this.brown, 'lowpass', 260, 1, 1.3 * i, 0.01, 1.0);

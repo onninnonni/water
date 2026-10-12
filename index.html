@@ -107,6 +107,17 @@
     #hurt { position: fixed; inset: 0; pointer-events: none; opacity: 0;
       background: radial-gradient(ellipse at center, rgba(150,0,0,0) 40%, rgba(150,0,0,0.75) 100%); }
     #reelT, #cutT { display: none; }
+    /* Sea water thrown over the lens after a splash-down. */
+    #drench { position: fixed; inset: 0; pointer-events: none; display: none; opacity: 0;
+      background:
+        radial-gradient(circle at 18% 30%, rgba(225,240,245,0.55) 0 3%, transparent 6%),
+        radial-gradient(circle at 72% 22%, rgba(225,240,245,0.5) 0 2.5%, transparent 5%),
+        radial-gradient(circle at 60% 70%, rgba(225,240,245,0.45) 0 4%, transparent 7.5%),
+        radial-gradient(circle at 30% 78%, rgba(225,240,245,0.5) 0 2%, transparent 4.5%),
+        radial-gradient(circle at 88% 55%, rgba(225,240,245,0.45) 0 3.5%, transparent 6.5%),
+        radial-gradient(circle at 45% 40%, rgba(225,240,245,0.35) 0 1.5%, transparent 3.5%),
+        radial-gradient(ellipse at 50% 0%, rgba(200,225,232,0.55), rgba(160,195,205,0.18) 55%, rgba(200,225,232,0.45));
+      -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
     #status { min-height: 1.4em; color: var(--amber); font-size: 13px; }
     .touchonly { display: none; }
     body.touch .touchonly { display: block; }
@@ -128,6 +139,7 @@
   <canvas id="c"></canvas>
   <div id="vignette"></div>
   <div id="hurt"></div>
+  <div id="drench"></div>
 
   <div id="hud">
     <canvas id="compass"></canvas>

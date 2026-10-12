@@ -26,6 +26,8 @@ Live: https://onnin.no · The original 2D fluid simulator: https://pikos.org/juh
   down, whoever holds your wheel can press `G` to cut her loose.
 - **The Leviathan:** a giant serpent that rises in the biggest seas, far out in the storm (see the
   red ring on the map), with its own war-drum and deep-choir music.
+- **The storm:** in the heart of the storm the ship can fly off a crest and slam into the trough
+  below: a splash-down throws white water over the deck, staggers the crew and drenches the lens.
 - **Touch:** left thumb moves or steers, right thumb looks, buttons for everything else.
 
 ## How it works

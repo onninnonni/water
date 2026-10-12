@@ -266,7 +266,9 @@ export function shipAxes(psi: number, th: number, ph: number) {
   return { X, Y, Z };
 }
 
-export interface ShipEvent { type: 'slam' | 'crash' | 'green'; i: number; }
+// A splash-down needs a plunge faster than SPLASH_VZ m/s stopped harder than SPLASH_DECEL m/s².
+export const SPLASH_VZ = 5.5, SPLASH_DECEL = 13;
+export interface ShipEvent { type: 'slam' | 'crash' | 'green' | 'splash'; i: number; }
 
 export class Ship {
   x = 0; y = -300; psi = -Math.PI / 2; vx = 0; vy = 0; r = 0;
@@ -274,7 +276,9 @@ export class Ship {
   rudder = 0; sail = 0; sailSet = 0.08; hull = 100;
   u = 0; imm = 0; waterZ = 0;
   events: ShipEvent[] = [];
-  private slamCd = 0; private crashCd = 0; private greenCd = 0;
+  private slamCd = 0; private crashCd = 0; private greenCd = 0; private splashCd = 0;
+  private minVz = 0; private peakDecel = 0; private airT = 0;
+  lastDrop: [number, number] = [0, 0]; // descent tracking for splash-downs
   private sm = [newSample(), newSample(), newSample(), newSample(), newSample()];
 
   place(x: number, y: number, psi: number) {
@@ -330,7 +334,13 @@ export class Ship {
     this.psi += this.r * dt;
     this.x += this.vx * dt; this.y += this.vy * dt;
 
-    this.vz += ((zT + 0.4 - this.z) * 4.6 - 3.0 * this.vz) * dt; this.z += this.vz * dt;
+    // Heave: buoyancy pushes up hard when the hull is pressed in, but when the sea falls away under
+    // her (over a steep crest) she can only fall as fast as gravity allows, then lands hard.
+    const dz = zT + 0.4 - this.z;
+    const azz = dz >= 0 ? dz * 4.6 - 3.0 * this.vz : Math.max(dz * 4.6 - 0.8 * this.vz, -9.81);
+    this.airT = dz < -0.6 ? this.airT + dt : 0;
+    const vzPrev = this.vz;
+    this.vz += azz * dt; this.z += this.vz * dt;
     this.thv += ((thT - this.th) * 4.0 - 2.6 * this.thv) * dt; this.th = clamp(this.th + this.thv * dt, -0.6, 0.6);
     const heel = clamp(this.r * u * 0.25, -0.12, 0.12) + this.sailSet * 0.07 * Math.sin(windAng);
     this.phv += ((phT + heel - this.ph) * 3.0 - 1.3 * this.phv) * dt; this.ph = clamp(this.ph + this.phv * dt, -0.6, 0.6);
@@ -345,6 +355,21 @@ export class Ship {
       this.slamCd = 0.9;
       this.thv += i * 0.12; this.vz += i * 0.5;
       this.vx -= fx * u * 0.06 * i; this.vy -= fy * u * 0.06 * i;
+    }
+    // Splash-down: a fast plunge (down a big wave face or off a crest) stopped abruptly in the trough.
+    this.splashCd -= dt;
+    if (this.vz < -1.5) this.minVz = Math.min(this.minVz, this.vz);
+    if (this.minVz < 0) this.peakDecel = Math.max(this.peakDecel, (this.vz - vzPrev) / dt);
+    if (this.minVz < 0 && this.vz > -1.0) {
+      if (this.minVz < -SPLASH_VZ && this.peakDecel > SPLASH_DECEL && this.splashCd <= 0) {
+        const i = clamp(0.3 + (-this.minVz - SPLASH_VZ) / 10 + this.airT * 0.15, 0.3, 1);
+        this.events.push({ type: 'splash', i });
+        this.splashCd = 2.5;
+        this.thv -= 0.12 * i; this.phv += (Math.random() - 0.5) * 0.18 * i; this.vz += 1.2 * i;
+        this.vx -= fx * u * 0.2 * i; this.vy -= fy * u * 0.2 * i;
+      }
+      this.lastDrop = [this.minVz, this.peakDecel];
+      this.minVz = 0; this.peakDecel = 0;
     }
     if (this.imm > 1.2 && this.greenCd <= 0) { this.events.push({ type: 'green', i: clamp((this.imm - 1.2) / 3, 0.2, 1) }); this.greenCd = 1.2; }
     this.collide(fx, fy, lx, ly);

@@ -13,6 +13,7 @@ export interface Monster {
   id: number; x: number; y: number; hd: number; sp: number; phase: number; hp: number; maxHp: number; st: MS; t: number;
   rear: number; dying: number; hurt: number; trail: number[]; segs: V3[]; orbit: number; dir: number;
   boss: boolean; scale: number; target: number; held: number;
+  lx: number; ly: number; vx: number; vy: number; // measured velocity, sent to other clients
 }
 
 export function buildSegmentMesh(): number[] {
@@ -58,6 +59,12 @@ export function layoutSegments(m: Monster, time: number) {
 
 export function pushTrail(m: Monster) {
   const lx = m.trail[0] ?? m.x - Math.cos(m.hd), ly = m.trail[1] ?? m.y - Math.sin(m.hd);
+  const back = (m.x - lx) * Math.cos(m.hd) + (m.y - ly) * Math.sin(m.hd) < 0;
+  if (back && m.trail.length > 2) {
+    // Dragged backwards (by a harpoon line): slide back along the body instead of folding it.
+    if (Math.hypot(m.trail[2] - m.x, m.trail[3] - m.y) < Math.hypot(lx - m.x, ly - m.y) + 0.2 * m.scale) m.trail.splice(0, 2);
+    return;
+  }
   if (Math.hypot(m.x - lx, m.y - ly) > 1.0 * m.scale) {
     m.trail.unshift(m.x, m.y);
     const max = Math.floor((SEGS * SEG_GAP * m.scale + 6) / m.scale) * 2 + 4;
@@ -72,7 +79,7 @@ function make(id: number, x: number, y: number, hd: number, boss: boolean): Mons
   return {
     id, x, y, hd, sp: boss ? 12 : 9, phase: 0, hp: boss ? 40 : 4, maxHp: boss ? 40 : 4, st: MS.Approach, t: 0, rear: 0, dying: 0, hurt: 0,
     trail: [], segs: [], orbit: boss ? 110 + Math.random() * 30 : 45 + Math.random() * 30, dir: Math.random() < 0.5 ? 1 : -1,
-    boss, scale: boss ? 3.2 : 1, target: 0, held: 0,
+    boss, scale: boss ? 3.2 : 1, target: 0, held: 0, lx: x, ly: y, vx: Math.cos(hd) * (boss ? 12 : 9), vy: Math.sin(hd) * (boss ? 12 : 9),
   };
 }
 
@@ -105,6 +112,9 @@ export class MonsterSystem {
       }
     }
     for (const m of this.list) {
+      // Actual velocity over the last frame, rope pulls included.
+      if (dt > 0) { const kv = 1 - Math.exp(-dt * 6); m.vx += ((m.x - m.lx) / dt - m.vx) * kv; m.vy += ((m.y - m.ly) / dt - m.vy) * kv; }
+      m.lx = m.x; m.ly = m.y;
       m.t += dt; m.hurt = Math.max(0, m.hurt - dt * 2);
       let tgt = ships[0];
       let best = Infinity;
@@ -163,6 +173,10 @@ export class MonsterSystem {
     if (d > len && d > 1e-3) {
       const k = Math.min(1, dt * (m.boss ? 1.2 : 4));
       m.x -= dx / d * (d - len) * k; m.y -= dy / d * (d - len) * k;
+      // The line hauls the head round toward the ship and saps its speed.
+      const toShip = Math.atan2(-dy, -dx), turn = Math.atan2(Math.sin(toShip - m.hd), Math.cos(toShip - m.hd));
+      if (Math.abs(turn) > Math.PI / 2) m.hd += Math.sign(turn) * Math.min(Math.abs(turn) - Math.PI / 2, dt * (m.boss ? 0.35 : 0.8) * (1 + (d - len) / 8));
+      m.sp *= Math.exp(-dt * Math.min(d - len, 20) * 0.04);
     }
   }
 
@@ -183,18 +197,25 @@ export class MonsterSystem {
     return false;
   }
   pack(): number[][] {
-    return this.list.map((m) => [m.id, +m.x.toFixed(2), +m.y.toFixed(2), +m.hd.toFixed(3), +m.phase.toFixed(3), m.hp, m.st, +m.rear.toFixed(3), +m.dying.toFixed(3), +m.hurt.toFixed(2), m.boss ? 1 : 0, m.maxHp]);
+    return this.list.map((m) => [m.id, +m.x.toFixed(2), +m.y.toFixed(2), +m.hd.toFixed(3), +m.phase.toFixed(3), m.hp, m.st, +m.rear.toFixed(3), +m.dying.toFixed(3), +m.hurt.toFixed(2), m.boss ? 1 : 0, m.maxHp, +m.sp.toFixed(2), +m.vx.toFixed(2), +m.vy.toFixed(2)]);
   }
-  // Other clients: ease toward the world host's snapshot, keeping local trails.
-  apply(rows: number[][], dt: number, time: number) {
+  // Other clients: dead-reckon from the world host's snapshot (taken at host time tm) and ease
+  // toward it, advancing the body wave locally so motion stays smooth between 10 Hz updates.
+  apply(rows: number[][], dt: number, time: number, tm: number) {
     const keep = new Map(this.list.map((m) => [m.id, m]));
-    const k = 1 - Math.exp(-dt * 10);
+    const k = 1 - Math.exp(-dt * 4), age = clamp(time - tm, 0, 0.5);
     this.list = rows.map((r) => {
       let m = keep.get(r[0]);
-      if (!m) { m = make(r[0], r[1], r[2], r[3], !!r[10]); }
-      m.x += (r[1] - m.x) * k; m.y += (r[2] - m.y) * k;
+      const vx = r[13] ?? 0, vy = r[14] ?? 0, sp = r[12] ?? 0;
+      if (!m) { m = make(r[0], r[1], r[2], r[3], !!r[10]); m.phase = r[4]; m.lx = r[1]; m.ly = r[2]; }
+      m.vx = vx; m.vy = vy; m.sp = sp;
+      const px = r[1] + vx * age, py = r[2] + vy * age;
+      if (Math.hypot(px - m.x, py - m.y) > 60 * m.scale) { m.x = px; m.y = py; m.trail = []; }
+      m.x += vx * dt + (px - m.x) * k; m.y += vy * dt + (py - m.y) * k;
       m.hd += Math.atan2(Math.sin(r[3] - m.hd), Math.cos(r[3] - m.hd)) * k;
-      m.phase = r[4]; m.hp = r[5]; m.st = r[6] as MS; m.rear += (r[7] - m.rear) * k; m.dying = r[8]; m.hurt = r[9]; m.maxHp = r[11] ?? m.maxHp;
+      const rate = (1.6 + sp * 0.12) / Math.sqrt(m.scale);
+      m.phase += rate * dt + (r[4] + rate * age - m.phase) * k;
+      m.hp = r[5]; m.st = r[6] as MS; m.rear += (r[7] - m.rear) * k; m.dying = r[8]; m.hurt = r[9]; m.maxHp = r[11] ?? m.maxHp;
       pushTrail(m); layoutSegments(m, time);
       return m;
     });
