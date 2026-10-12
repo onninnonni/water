@@ -14,6 +14,8 @@ export interface Monster {
   rear: number; dying: number; hurt: number; trail: number[]; segs: V3[]; orbit: number; dir: number;
   boss: boolean; scale: number; target: number; held: number;
   lx: number; ly: number; vx: number; vy: number; // measured velocity, sent to other clients
+  // A rider with both hooks set steers the beast (world host only): turn -1..1, gas -1..1.
+  rider: number; riderShip: number; steerT: number; steerTurn: number; steerGas: number; ramCd: number;
 }
 
 export function buildSegmentMesh(): number[] {
@@ -79,7 +81,7 @@ function make(id: number, x: number, y: number, hd: number, boss: boolean): Mons
   return {
     id, x, y, hd, sp: boss ? 12 : 9, phase: 0, hp: boss ? 40 : 4, maxHp: boss ? 40 : 4, st: MS.Approach, t: 0, rear: 0, dying: 0, hurt: 0,
     trail: [], segs: [], orbit: boss ? 110 + Math.random() * 30 : 45 + Math.random() * 30, dir: Math.random() < 0.5 ? 1 : -1,
-    boss, scale: boss ? 3.2 : 1, target: 0, held: 0, lx: x, ly: y, vx: Math.cos(hd) * (boss ? 12 : 9), vy: Math.sin(hd) * (boss ? 12 : 9),
+    boss, scale: boss ? 3.2 : 1, target: 0, held: 0, rider: 0, riderShip: 0, steerT: 99, steerTurn: 0, steerGas: 0, ramCd: 0, lx: x, ly: y, vx: Math.cos(hd) * (boss ? 12 : 9), vy: Math.sin(hd) * (boss ? 12 : 9),
   };
 }
 
@@ -144,6 +146,20 @@ export class MonsterSystem {
         head = tgt ? Math.atan2(dy, dx) : m.hd; speed = 11 * S;
         if (m.t > (m.boss ? 4 : 5) && (storm >= 0.08 || m.boss)) { m.st = MS.Circle; m.t = 0; }
       }
+      // Ridden and steered: the rider's hooks override the hunt. Steer it into a ship to ram her.
+      m.steerT += dt; m.ramCd -= dt;
+      const steered = m.rider !== 0 && m.steerT < 0.6 && m.st !== MS.Dying;
+      if (steered) {
+        head = m.hd + m.steerTurn * 1.4; speed = (11 + 9 * m.steerGas) * S;
+        if (m.st === MS.Lunge || m.st === MS.Approach) m.st = MS.Circle;
+        m.t = 0;
+        if (m.ramCd <= 0) for (const s of ships) {
+          if (s.id === m.riderShip) continue;
+          const c = Math.cos(s.psi), sn = Math.sin(s.psi), ex = m.x - s.x, ey = m.y - s.y;
+          const lx = ex * c + ey * sn, ly = -ex * sn + ey * c;
+          if (Math.abs(lx) < 19 + 2 * m.scale && Math.abs(ly) < 6 + 2 * m.scale) { ev.ram(m, s.id, Math.sign(ly) || 1); m.ramCd = 4; break; }
+        }
+      } else if (m.steerT > 2) m.rider = 0;
       // A harpoon rope slows the beast.
       if (m.held > 0) { speed *= 0.45; m.held = Math.max(0, m.held - dt); }
       const turn = Math.atan2(Math.sin(head - m.hd), Math.cos(head - m.hd));
@@ -159,7 +175,7 @@ export class MonsterSystem {
     this.list = this.list.filter((m) => {
       if (m.dying >= 1) { if (m.boss) this.bossCooldown = 180; return false; }
       const far = !ships.some((s) => Math.hypot(m.x - s.x, m.y - s.y) < (m.boss ? 1600 : 450));
-      if (far && (m.st === MS.Retreat || m.boss)) { if (m.boss) this.bossCooldown = 20; return false; }
+      if (far && (m.st === MS.Retreat || m.boss) && !(m.rider && m.steerT < 2)) { if (m.boss) this.bossCooldown = 20; return false; }
       return true;
     });
   }
@@ -171,13 +187,19 @@ export class MonsterSystem {
     m.held = 0.5;
     const dx = m.x - px, dy = m.y - py, d = Math.hypot(dx, dy);
     if (d > len && d > 1e-3) {
-      const k = Math.min(1, dt * (m.boss ? 1.2 : 4));
+      const k = Math.min(1, dt * (m.boss ? 0.6 : 4)); // the Leviathan outweighs the ship: it tows her
       m.x -= dx / d * (d - len) * k; m.y -= dy / d * (d - len) * k;
       // The line hauls the head round toward the ship and saps its speed.
       const toShip = Math.atan2(-dy, -dx), turn = Math.atan2(Math.sin(toShip - m.hd), Math.cos(toShip - m.hd));
       if (Math.abs(turn) > Math.PI / 2) m.hd += Math.sign(turn) * Math.min(Math.abs(turn) - Math.PI / 2, dt * (m.boss ? 0.35 : 0.8) * (1 + (d - len) / 8));
       m.sp *= Math.exp(-dt * Math.min(d - len, 20) * 0.04);
     }
+  }
+
+  steer(id: number, rider: number, riderShip: number, turn: number, gas: number) {
+    const m = this.list.find((x) => x.id === id);
+    if (!m) return;
+    m.rider = rider; m.riderShip = riderShip; m.steerT = 0; m.steerTurn = clamp(turn, -1, 1); m.steerGas = clamp(gas, -1, 1);
   }
 
   hitTest(p: V3, pad: number): Monster | null {

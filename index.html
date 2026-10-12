@@ -106,7 +106,7 @@
     #hpfill { height: 100%; width: 100%; background: #d9d2c4; transition: width 0.2s; }
     #hurt { position: fixed; inset: 0; pointer-events: none; opacity: 0;
       background: radial-gradient(ellipse at center, rgba(150,0,0,0) 40%, rgba(150,0,0,0.75) 100%); }
-    #reelT, #cutT { display: none; }
+    #reelT, #cutT, #jumpT { display: none; }
     /* Sea water thrown over the lens after a splash-down. */
     #drench { position: fixed; inset: 0; pointer-events: none; display: none; opacity: 0;
       background:
@@ -172,6 +172,7 @@
     <div id="touchui">
       <div id="stick"><div id="knob"></div></div>
       <div id="tbtns">
+        <button id="jumpT" class="tbtn">Jump</button>
         <button id="cutT" class="tbtn">Cut loose</button>
         <button id="reelT" class="tbtn">Reel</button>
         <button id="fireT" class="tbtn">Fire</button>

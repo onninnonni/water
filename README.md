@@ -20,11 +20,18 @@ Live: https://onnin.no · The original 2D fluid simulator: https://pikos.org/juh
 - **The harpoon:** `E` at the bow, aim with the mouse, click to fire. It bites serpents, the
   Leviathan and other ships and ties them to you. A harpooned serpent tows the ship by the bow,
   swinging her round so it is always ahead or abeam, never astern. Hold `R` or right mouse to reel in; click again to
-  rip it out, which does more damage the longer it held.
+  rip it out, which does more damage the longer it held. Reeling in on the Leviathan hauls the ship
+  after it like a sled.
 - **Ship against ship:** cannons and harpoons hit other ships. With another ship alongside, `E` at
   the main-deck rail lays a gangplank that lashes the hulls together; `E` at its end to cross. The
   crews fight with cutlasses; the fallen stay down until it is settled. When the other crew is all
   down, whoever holds your wheel can press `G` to cut her loose.
+- **Wings:** folded wings hang at every masthead. From a mast platform or the top of a mast, `J`
+  jumps off and glides: look down (or `W`) to dive and gain speed, up (`S`) to stretch the glide,
+  `A`/`D` to turn. Land on any deck; the sea or the rocks mean being fished out and hauled aboard.
+- **Riding the Leviathan:** land on its head, then set two hooks before it shakes you off: left
+  (click or `Q`) and right (right-click or `E`). Hooked in, `A`/`D` steer it and `W`/`S` drive it
+  faster or slower; steer it into an enemy ship to ram her. `J` leaps off.
 - **The Leviathan:** a giant serpent that rises in the biggest seas, far out in the storm (see the
   red ring on the map), with its own war-drum and deep-choir music.
 - **The storm:** in the heart of the storm the ship can fly off a crest and slam into the trough

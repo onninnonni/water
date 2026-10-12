@@ -2,12 +2,12 @@ import * as S from './shaders';
 import { Mat4, perspective, lookAt, multiply } from './mat4';
 import { IC, SUN_DIR, WIND_DIR, clamp, mix, mix3, smoothstep, stormAt, norm3 } from './world';
 import { uWA, uWB, updatePhases, sampleWater, newSample, sigWaveHeight } from './waves';
-import { buildLand, buildShoreMap, buildBuoy, PILLARS, ARCH, LIGHTHOUSE, BUOYS, SHORE, BUOY_COLS } from './island';
+import { buildLand, buildShoreMap, buildBuoy, terrainHeight, PILLARS, ARCH, LIGHTHOUSE, BUOYS, SHORE, BUOY_COLS } from './island';
 import {
   Ship, shipAxes, buildShipMesh, buildSailMesh, buildCannonMesh, buildHarpoonMesh, buildBoltMesh, buildBallMesh, buildWheelMesh,
   ShipEvent, MASTS, CANNONS, HELM, HARPOON, deckZ, moveOnDeck, halfBeam, climbX, climbTop, nestZ, moveOnNest, railPoint, hullContains, HULL_CIRCLES, MAIN_DECK,
 } from './ship';
-import { buildAvatarParts, avatarPose, RZ, TR, AvatarParts } from './avatar';
+import { buildAvatarParts, buildWings, avatarPose, RZ, TR, AvatarParts } from './avatar';
 import { MonsterSystem, Monster, MS, segRadius, buildSegmentMesh, buildHeadMesh, BOSS_POS } from './monsters';
 import { MeshBuilder } from './mesh';
 import { Net, NetMsg } from './net';
@@ -126,6 +126,7 @@ const wheelMesh = solid(buildWheelMesh());
 const segMesh = solid(buildSegmentMesh());
 const headMesh = solid(buildHeadMesh());
 const buoyMeshes = [0, 1, 2].map((k) => solid(buildBuoy(k as 0 | 1 | 2)));
+const foldedWings = solid(buildWings(false));
 const ropeMesh = (() => { const m = new MeshBuilder(); m.tube([0, 0, 0], [1, 0, 0], 1, 1, 6, [0.22, 0.17, 0.1]); return solid(m.data); })();
 const plankMesh = (() => {
   const m = new MeshBuilder();
@@ -231,16 +232,18 @@ function newShipEnt(id: number, owner: number, name: string, captain: string): S
 }
 const shipName = (id: number) => SHIP_NAMES[id % SHIP_NAMES.length];
 
-type Mode = 'walk' | 'helm' | 'harpoon' | 'climb' | 'nest' | 'plank' | 'down';
+type Mode = 'walk' | 'helm' | 'harpoon' | 'climb' | 'nest' | 'plank' | 'down' | 'glide' | 'ride';
 interface Player {
   id: number; name: string; color: number; crew: number; on: number; x: number; y: number; z: number; yaw: number; pitch: number; mode: Mode;
   hp: number; walk: number; phase: number; wave: number; aimYaw: number; aimPitch: number; moving: boolean; swing: number; mast: number;
   reel: boolean; snaps: { t: number; x: number; y: number; z: number; yaw: number; pitch: number; ay: number; ap: number; on: number }[];
   tag?: HTMLDivElement; lastStep: number; seen: number;
+  // Gliding (on = -1, x/y/z in world space) and riding the Leviathan (on = RIDE_BASE - monster id).
+  gv: V3; ride: number; hookMask: number; rideT: number;
 }
 const newPlayer = (id: number, name: string, color: number): Player => ({
   id, name, color, crew: 0, on: 0, x: -6, y: 0, z: MAIN_DECK, yaw: 0, pitch: 0, mode: 'walk', hp: 100, walk: 0, phase: 0, wave: 0, aimYaw: 0, aimPitch: 0,
-  moving: false, swing: 0, mast: 0, reel: false, snaps: [], lastStep: 0, seen: now(),
+  moving: false, swing: 0, mast: 0, reel: false, snaps: [], lastStep: 0, seen: now(), gv: [0, 0, 0], ride: 0, hookMask: 0, rideT: 0,
 });
 const me = newPlayer(1, 'Pirate', 0);
 const others = new Map<number, Player>();
@@ -259,7 +262,7 @@ function lockPointer() {
 
 const atm = { s: 0, fog: [0, 0, 0] as V3, sky: [0, 0, 0] as V3, sun: [0, 0, 0] as V3, ambT: [0, 0, 0] as V3, ambB: [0, 0, 0] as V3, fogDen: 0, rain: 0, wind: 0 };
 const windVec: [number, number] = [Math.cos(WIND_DIR), Math.sin(WIND_DIR)];
-function focusShip(): Ship { return onShip()?.ship ?? ships.get(0)?.ship ?? [...ships.values()][0]?.ship ?? new Ship(); }
+function focusShip(): Ship { return onShip()?.ship ?? crewShip()?.ship ?? ships.get(0)?.ship ?? [...ships.values()][0]?.ship ?? new Ship(); }
 function updateAtmosphere(dt: number) {
   const f = focusShip();
   atm.s += (stormAt(f.x, f.y) - atm.s) * (1 - Math.exp(-dt / 4));
@@ -342,6 +345,8 @@ function toLocal(e: ShipEnt, w: V3): V3 {
 
 function interact() {
   if (!playing || me.mode === 'down') return;
+  if (me.mode === 'ride') { plantHook(1); return; }
+  if (me.mode === 'glide') return;
   const e = onShip();
   if (me.mode === 'helm') { leaveHelm(); return; }
   if (me.mode === 'harpoon') { me.mode = 'walk'; me.x = HARPOON.x - 1.9; me.y = 0; reelHeld = false; return; }
@@ -370,6 +375,8 @@ function leaveHelm() {
 }
 function fireAction() {
   if (!playing || me.mode === 'down') return;
+  if (me.mode === 'ride') { plantHook(0); return; }
+  if (me.mode === 'glide') return;
   const e = onShip();
   if (!e) return;
   if (me.mode === 'harpoon') {
@@ -391,7 +398,8 @@ window.addEventListener('keydown', (e) => {
   keys.add(k);
   if (!playing || e.repeat) return;
   if (k === 'e') interact();
-  if (k === 'q') wave();
+  if (k === 'q') { if (me.mode === 'ride') plantHook(0); else wave(); }
+  if (k === 'j') jump();
   if (k === 'c') toggleCam();
   if (k === 'm') toggleMute();
   if (k === 'g') cutGangplank();
@@ -405,7 +413,7 @@ canvas.addEventListener('mousedown', (e) => {
   if (!playing || isTouch) return;
   if (document.pointerLockElement !== canvas) { lockPointer(); if (e.button !== 0) return; }
   if (e.button === 0) fireAction();
-  if (e.button === 2) reelHeld = true;
+  if (e.button === 2) { if (me.mode === 'ride') plantHook(1); else reelHeld = true; }
 });
 canvas.addEventListener('mouseup', (e) => { if (e.button === 2) reelHeld = false; });
 document.addEventListener('mousemove', (e) => {
@@ -433,6 +441,7 @@ canvas.addEventListener('pointerup', endPtr);
 canvas.addEventListener('pointercancel', endPtr);
 const tap = (id: string, fn: () => void) => $(id).addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); fn(); });
 tap('fireT', fireAction); tap('actT', interact); tap('waveT', wave); tap('cutT', cutGangplank);
+tap('jumpT', jump);
 $('reelT').addEventListener('pointerdown', (e) => { e.preventDefault(); reelHeld = true; });
 $('reelT').addEventListener('pointerup', () => { reelHeld = false; });
 $('reelT').addEventListener('pointercancel', () => { reelHeld = false; });
@@ -479,7 +488,9 @@ function updateControls(dt: number) {
     me.moving = len > 0.05;
     me.walk += ((me.moving ? 1 : 0) - me.walk) * (1 - Math.exp(-dt * 8));
     if (me.moving) me.phase += dt * run * 2.4;
-  } else if (me.mode === 'climb') {
+  } else if (me.mode === 'glide') updateGlide(dt, mx, my);
+  else if (me.mode === 'ride') updateRide(dt, mx, my);
+  else if (me.mode === 'climb') {
     const top = climbTop(me.mast);
     me.z = clamp(me.z + my * 2.6 * dt, MASTS[me.mast].base - 0.5, top);
     if (my !== 0) me.phase += dt * 6;
@@ -498,6 +509,8 @@ function updateControls(dt: number) {
 
 // ---------- Sword fighting ----------
 function playerWorld(p: Player): V3 | null {
+  if (p.on === -1) return [p.x, p.y, p.z];
+  if (p.on <= RIDE_BASE) { const m = rideMonster(RIDE_BASE - p.on); const f = m && rideFrame(m); return f ? f.pos : null; }
   const e = ships.get(p.on);
   if (!e) return null;
   return e.ship.local(p.x, p.y, p.z);
@@ -598,6 +611,135 @@ function updatePlank(dt: number) {
   }
 }
 
+// ---------- Wings and Leviathan riding ----------
+// Folded wings hang at each masthead: jump from the top of a mast or its platform and glide. Land
+// on a deck, or on the Leviathan's head, where two hooks must be set before it shakes you off;
+// with both set, the rider steers it.
+const RIDE_BASE = -100;
+const RIDE_GRACE = [3.5, 8]; // seconds the beast tolerates a rider with 0 or 1 hooks set
+let steerTurn = 0, steerGas = 0, steerSendT = 0, remountAt = 0;
+const hookCount = (mask: number) => (mask & 1) + ((mask >> 1) & 1);
+const rideMonster = (id: number) => monsters.list.find((m) => m.id === id && m.st !== MS.Dying);
+function rideFrame(m: Monster): { pos: V3; yaw: number } | null {
+  if (m.segs.length < 3) return null;
+  const a = m.segs[1], h = m.segs[0];
+  return { pos: [a[0], a[1], a[2] + segRadius(1, m.scale) * 0.92], yaw: Math.atan2(h[1] - a[1], h[0] - a[0]) };
+}
+const aloft = () => me.mode === 'nest' || (me.mode === 'climb' && me.z > climbTop(me.mast) - 3);
+const canJump = () => playing && (aloft() || me.mode === 'ride');
+function launch(p: V3, v: V3, yaw: number) {
+  if (me.mode === 'ride') remountAt = time + 1.5; // clear the beast before you can land on it again
+  me.mode = 'glide'; me.on = -1; me.x = p[0]; me.y = p[1]; me.z = p[2]; me.gv = v; me.yaw = yaw; me.pitch = -0.25;
+  me.hookMask = 0; plankMove = null;
+}
+function jump() {
+  if (!canJump()) return;
+  if (me.mode === 'ride') {
+    const m = rideMonster(me.ride), f = m && rideFrame(m);
+    if (!m || !f) return;
+    const yaw = f.yaw + me.yaw;
+    launch([f.pos[0], f.pos[1], f.pos[2] + 1], [m.vx + Math.cos(yaw) * 5, m.vy + Math.sin(yaw) * 5, 9], yaw);
+    toast('You leap from the beast', 1.5);
+  } else {
+    const e = onShip();
+    if (!e) return;
+    const fwd = shipDir(e, Math.cos(me.yaw), Math.sin(me.yaw), 0), yaw = Math.atan2(fwd[1], fwd[0]);
+    launch(e.ship.local(me.x, me.y, me.z + 0.4), [e.ship.vx + Math.cos(yaw) * 10, e.ship.vy + Math.sin(yaw) * 10, e.ship.vz + 2.5], yaw);
+    toast('Wings out!', 1.5);
+  }
+  audio.whoosh(0);
+}
+function seaRescue(msg: string, dmg: number) {
+  const w = sampleWater(me.x, me.y, camSample).z;
+  burst([me.x, me.y, w], 70, 6, 9, 1.2);
+  audio.splash(0.9, 0);
+  me.hp = Math.max(1, me.hp - dmg);
+  me.mode = 'walk'; me.on = me.crew; me.x = -6; me.y = (Math.random() - 0.5) * 3; me.z = MAIN_DECK; me.yaw = 0; me.pitch = 0; me.hookMask = 0;
+  hurtFlash = 0.6;
+  toast(msg, 2.5);
+}
+function updateGlide(dt: number, mx: number, my: number) {
+  me.yaw -= mx * 1.3 * dt;
+  me.pitch = clamp(me.pitch - my * 0.9 * dt, -1.2, 0.6);
+  const v = me.gv, cp = Math.cos(me.pitch);
+  const dir: V3 = [Math.cos(me.yaw) * cp, Math.sin(me.yaw) * cp, Math.sin(me.pitch)];
+  v[2] -= 9.81 * dt;
+  // The wings bend the flight path toward where you look; airspeed gives lift; drag bleeds speed.
+  const sp = Math.hypot(v[0], v[1], v[2]), k = Math.min(1, 2.2 * dt);
+  for (let i = 0; i < 3; i++) v[i] += (dir[i] * sp - v[i]) * k;
+  const L = 9.81 * 0.95 * Math.min(1, (sp / 12) ** 2) * dt, sn = Math.sin(me.pitch);
+  v[0] -= sn * Math.cos(me.yaw) * L; v[1] -= sn * Math.sin(me.yaw) * L; v[2] += cp * L; // lift, square to the flight path
+  const drag = Math.exp(-dt * (0.022 + 0.0013 * sp));
+  for (let i = 0; i < 3; i++) v[i] *= drag;
+  me.x += v[0] * dt; me.y += v[1] * dt; me.z += v[2] * dt;
+  me.walk = 0; me.moving = true;
+  // Landing on a deck (any ship).
+  for (const e of ships.values()) {
+    if (e.preview) continue;
+    const l = toLocal(e, [me.x, me.y, me.z]);
+    if (Math.abs(l[0]) > 18.5 || Math.abs(l[1]) > halfBeam(clamp(l[0], -18, 18)) + 0.3) continue;
+    const dz = l[2] - deckZ(l[0], l[1]);
+    if (dz > 0.4 || dz < -3) continue;
+    const rel = Math.hypot(v[0] - e.ship.vx, v[1] - e.ship.vy, v[2] - e.ship.vz);
+    me.mode = 'walk'; me.on = e.id;
+    [me.x, me.y] = moveOnDeck(l[0], l[1], 0, 0); me.z = deckZ(me.x, me.y);
+    me.yaw = me.yaw - e.ship.psi; me.pitch = 0;
+    cam.shake = Math.max(cam.shake, Math.min(0.4, rel * 0.015));
+    audio.step(0); audio.slap(Math.min(0.5, rel * 0.03));
+    if (rel > 22) takeDamage(25, 'A bone-breaking landing'); else toast(e.id === me.crew ? 'Back on deck' : `Landed on the ${e.name}!`, 2);
+    return;
+  }
+  // Landing on the Leviathan's head.
+  for (const m of monsters.list) {
+    if (!m.boss || m.st === MS.Dying || time < remountAt) continue;
+    for (let i = 0; i < 3 && i < m.segs.length; i++) {
+      const q = m.segs[i], r = segRadius(i, m.scale);
+      if (Math.hypot(me.x - q[0], me.y - q[1]) < r * 1.15 + 0.8 && me.z - q[2] > -r * 0.4 && me.z - q[2] < r + 2.5) { mount(m); return; }
+    }
+  }
+  const ground = terrainHeight(me.x, me.y);
+  if (ground > 0.3 && me.z < ground + 0.6) { seaRescue('You crashed on the rocks', 30); return; }
+  if (me.z < sampleWater(me.x, me.y, camSample).z + 0.2) seaRescue('Into the sea! Fished out and hauled aboard', 10);
+}
+function mount(m: Monster) {
+  me.mode = 'ride'; me.ride = m.id; me.on = RIDE_BASE - m.id; me.hookMask = 0; me.rideT = 0; me.yaw = 0; me.pitch = -0.15;
+  steerTurn = 0; steerGas = 0;
+  cam.shake = Math.max(cam.shake, 0.3);
+  audio.roar(0, true); audio.hit(0);
+  toast('On the Leviathan! Set both hooks!', 2.5);
+}
+function plantHook(side: 0 | 1) {
+  if (me.mode !== 'ride' || me.hookMask & (1 << side)) return;
+  me.hookMask |= 1 << side;
+  audio.cut(0); audio.roar(0, true);
+  cam.shake = Math.max(cam.shake, 0.15);
+  if (hookCount(me.hookMask) === 2) toast('Hooks set! Steer the beast', 2.5);
+}
+function throwOff(msg: string) {
+  const m = rideMonster(me.ride), f = m && rideFrame(m);
+  const p: V3 = f ? f.pos : [me.x, me.y, me.z];
+  const side = Math.random() < 0.5 ? 1 : -1, yaw = (f?.yaw ?? me.yaw) + side * Math.PI / 2;
+  launch([p[0], p[1], p[2] + 1], [(m?.vx ?? 0) + Math.cos(yaw) * 8, (m?.vy ?? 0) + Math.sin(yaw) * 8, 8], yaw);
+  cam.shake = Math.max(cam.shake, 0.5);
+  toast(msg, 2.5);
+}
+function updateRide(dt: number, mx: number, my: number) {
+  const m = rideMonster(me.ride), f = m && rideFrame(m);
+  if (!m || !f) { throwOff('The beast is gone from under you'); return; }
+  me.rideT += dt;
+  me.x = f.pos[0]; me.y = f.pos[1]; me.z = f.pos[2];
+  const hooks = hookCount(me.hookMask);
+  if (hooks < 2 && (me.rideT > RIDE_GRACE[hooks] || (hooks === 0 && me.rideT > 0.8 && m.rear > 0.6))) { throwOff('The Leviathan shakes you off!'); return; }
+  cam.shake = Math.max(cam.shake, hooks < 2 ? 0.06 : 0.015);
+  if (hooks === 2) {
+    steerTurn += clamp(-mx - steerTurn, -2.5 * dt, 2.5 * dt);
+    steerGas += clamp(my - steerGas, -1.5 * dt, 1.5 * dt);
+    steerSendT -= dt;
+    if (isWorldHost()) monsters.steer(m.id, me.id, me.crew, steerTurn, steerGas);
+    else if (steerSendT <= 0) { steerSendT = 0.1; net.send({ t: 'steer', m: m.id, tu: +steerTurn.toFixed(2), ga: +steerGas.toFixed(2), rs: me.crew }); }
+  }
+}
+
 // ---------- Camera ----------
 const cam = { eye: [0, 0, 5] as V3, fwd: [1, 0, 0] as V3, right: [0, -1, 0] as V3, up: [0, 0, 1] as V3, fov: 1.2, near: 0.25, shake: 0 };
 const camSample = newSample();
@@ -617,7 +759,29 @@ function updateCamera(dt: number) {
   cam.shake *= Math.exp(-dt * 5);
   const jit = () => (Math.random() - 0.5) * cam.shake;
   const e = onShip();
-  document.body.classList.toggle('fp', playing && camView === 'fp' && (me.mode === 'walk' || me.mode === 'climb' || me.mode === 'nest' || me.mode === 'harpoon'));
+  document.body.classList.toggle('fp', playing && camView === 'fp' && (me.mode === 'walk' || me.mode === 'climb' || me.mode === 'nest' || me.mode === 'harpoon' || me.mode === 'glide' || me.mode === 'ride'));
+  if (playing && me.mode === 'glide') {
+    const cp = Math.cos(me.pitch), dir: V3 = [Math.cos(me.yaw) * cp, Math.sin(me.yaw) * cp, Math.sin(me.pitch)];
+    const sp = Math.hypot(me.gv[0], me.gv[1], me.gv[2]);
+    let eye: V3 = [me.x, me.y, me.z + 0.3];
+    if (camView === 'tp') { eye = [me.x - Math.cos(me.yaw) * 7, me.y - Math.sin(me.yaw) * 7, me.z + 2.2]; keepAboveWater(eye, 0.8); }
+    const wob = Math.min(sp / 40, 1) * 0.04;
+    setLook(undefined, [eye[0] + jit() + (Math.random() - 0.5) * wob, eye[1] + jit(), eye[2] + jit()], camView === 'tp' ? sub([me.x + dir[0] * 6, me.y + dir[1] * 6, me.z + dir[2] * 6], eye) : dir, 1);
+    cam.fov = (72 + Math.min(sp, 40) * 0.5) * Math.PI / 180; cam.near = 0.2;
+    return;
+  }
+  if (playing && me.mode === 'ride') {
+    const m = rideMonster(me.ride), f = m && rideFrame(m);
+    if (f) {
+      const yaw = f.yaw + me.yaw, cp = Math.cos(me.pitch);
+      let eye: V3 = [f.pos[0], f.pos[1], f.pos[2] + 1.3];
+      let fwd: V3 = [Math.cos(yaw) * cp, Math.sin(yaw) * cp, Math.sin(me.pitch)];
+      if (camView === 'tp') { eye = [f.pos[0] - Math.cos(yaw) * 18, f.pos[1] - Math.sin(yaw) * 18, f.pos[2] + 8]; keepAboveWater(eye, 2); fwd = sub([f.pos[0], f.pos[1], f.pos[2] + 2], eye); }
+      setLook(undefined, [eye[0] + jit(), eye[1] + jit(), eye[2] + jit()], fwd, 1);
+      cam.fov = 74 * Math.PI / 180; cam.near = 0.3;
+      return;
+    }
+  }
   if (!playing || !e) {
     const f = focusShip();
     const a = Math.PI / 2 + 0.35 + time * 0.03, R = 70;
@@ -923,7 +1087,8 @@ function updateTethers(dt: number) {
       const reeling = (me.on === e.id && me.mode === 'harpoon' && me.reel) || [...others.values()].some((o) => o.on === e.id && o.mode === 'harpoon' && o.reel);
       if (reeling) t.len = Math.max(t.kind === 's' ? 14 : 9, t.len - (t.kind === 's' ? 7 : 5) * dt);
       const m = t.kind === 'm' ? monsters.list.find((x) => x.id === t.target) : undefined;
-      if (t.kind === 'm') e.ship.pullToward(ends.end[0], ends.end[1], ends.tip[0], ends.tip[1], t.len, m?.boss ? 0.9 : 0.25, dt, m?.vx ?? 0, m?.vy ?? 0);
+      // Reeling in on the Leviathan: the line bites harder and the ship is hauled after it like a sled.
+      if (t.kind === 'm') e.ship.pullToward(ends.end[0], ends.end[1], ends.tip[0], ends.tip[1], t.len, m?.boss ? (reeling ? 1.6 : 0.9) : (reeling ? 0.5 : 0.25), dt, m?.vx ?? 0, m?.vy ?? 0, reeling ? 8 : 6);
       else {
         // Ship to ship: each owner takes half of a stiff tow line, so the pair share the pull.
         const o = ships.get(t.target);
@@ -1251,14 +1416,25 @@ function updateHud(dt: number) {
     msg = isTouch ? (atNest ? 'Use: step onto the platform' : 'Stick up and down to climb · Use: slide down') : atNest ? '<kbd>E</kbd> step onto the platform · <kbd>W</kbd>/<kbd>S</kbd> climb' : '<kbd>W</kbd>/<kbd>S</kbd> climb · <kbd>E</kbd> slide down';
   }
   if (me.mode === 'nest') msg = isTouch ? 'Use: back onto the mast' : '<kbd>E</kbd> back onto the mast';
+  if (aloft()) msg += isTouch ? ' · Jump: glide' : ' · <kbd>J</kbd> jump and glide';
+  if (me.mode === 'glide') msg = isTouch ? 'Stick: dive, climb and turn · land on a deck or the Leviathan\'s head' : 'Mouse or <kbd>W</kbd>/<kbd>S</kbd> dive and climb · <kbd>A</kbd>/<kbd>D</kbd> turn · land on a deck or the Leviathan\'s head';
+  if (me.mode === 'ride') {
+    const h = me.hookMask, n = hookCount(h);
+    if (n < 2) {
+      const left = RIDE_GRACE[n] - me.rideT;
+      msg = `Set your hooks! ${h & 1 ? '✓' : isTouch ? 'Left hook' : '<kbd>Click</kbd>/<kbd>Q</kbd> left'} · ${h & 2 ? '✓' : isTouch ? 'Right hook' : '<kbd>Right-click</kbd>/<kbd>E</kbd> right'} · ${Math.max(0, left).toFixed(1)} s`;
+    } else msg = isTouch ? 'Stick: steer and drive the beast · Jump: leap off' : '<kbd>A</kbd>/<kbd>D</kbd> steer · <kbd>W</kbd>/<kbd>S</kbd> faster, slower · ram their ships · <kbd>J</kbd> leap off';
+  }
   if (me.mode === 'down') msg = inBoarding() ? 'You are down until the boarding is settled' : `Recovering… ${Math.max(0, Math.ceil(8 - downT))}`;
   if (isTouch) msg = msg.replace(/<kbd>(Click|E|G)<\/kbd> /g, '');
   promptEl.innerHTML = msg; promptEl.classList.toggle('show', !!msg && playing);
-  const fireLabel = me.mode === 'harpoon' ? (e?.tether ? 'Rip' : 'Fire') : t?.kind === 'cannon' ? 'Fire' : 'Slash';
+  const riding = me.mode === 'ride', setting = riding && hookCount(me.hookMask) < 2;
+  const fireLabel = riding ? 'Left hook' : me.mode === 'harpoon' ? (e?.tether ? 'Rip' : 'Fire') : t?.kind === 'cannon' ? 'Fire' : 'Slash';
   $('fireT').textContent = fireLabel;
-  $('fireT').style.display = me.mode === 'walk' || me.mode === 'nest' || me.mode === 'harpoon' ? 'block' : 'none';
-  $('actT').style.display = ((t && t.idx >= 0 && t.kind !== 'cannon') || (me.mode !== 'walk' && me.mode !== 'down' && me.mode !== 'plank')) ? 'block' : 'none';
-  $('actT').textContent = me.mode === 'walk' ? ({ helm: 'Wheel', harpoon: 'Harpoon', climb: 'Climb', plank: 'Cross', board: 'Gangplank', cannon: 'Fire' } as Record<string, string>)[t?.kind ?? 'helm'] : me.mode === 'climb' ? (Math.abs(me.z - nestZ(me.mast)) < 1.2 ? 'Step off' : 'Down') : me.mode === 'nest' ? 'Mast' : 'Leave';
+  $('fireT').style.display = me.mode === 'walk' || me.mode === 'nest' || me.mode === 'harpoon' || (setting && !(me.hookMask & 1)) ? 'block' : 'none';
+  $('actT').style.display = riding ? (setting && !(me.hookMask & 2) ? 'block' : 'none') : ((t && t.idx >= 0 && t.kind !== 'cannon') || (me.mode !== 'walk' && me.mode !== 'down' && me.mode !== 'plank' && me.mode !== 'glide')) ? 'block' : 'none';
+  $('jumpT').style.display = canJump() && !setting ? 'block' : 'none';
+  $('actT').textContent = me.mode === 'walk' ? ({ helm: 'Wheel', harpoon: 'Harpoon', climb: 'Climb', plank: 'Cross', board: 'Gangplank', cannon: 'Fire' } as Record<string, string>)[t?.kind ?? 'helm'] : me.mode === 'climb' ? (Math.abs(me.z - nestZ(me.mast)) < 1.2 ? 'Step off' : 'Down') : me.mode === 'nest' ? 'Mast' : riding ? 'Right hook' : 'Leave';
   $('reelT').style.display = me.mode === 'harpoon' && e?.tether ? 'block' : 'none';
   $('cutT').style.display = cut ? 'block' : 'none';
   if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) toastEl.classList.remove('show'); }
@@ -1303,6 +1479,18 @@ function beamModel(a: V3, b: V3, w: number, h: number): Mat4 {
 }
 function drawAvatar(p: Player, model: Mat4) {
   const meshes = avatarMeshes[p.color % avatarMeshes.length];
+  if (p.mode === 'glide') {
+    const base = mul(TR(p.x, p.y, p.z - 1), RZ(p.yaw), RYm(-p.pitch));
+    for (const [part, m] of avatarPose(base, { phase: 0, walk: 0, wave: 0, hold: 0, time, look: 0, swing: 0, climb: 0, down: 0, sword: false, glide: 1 })) draw(meshes[part], m);
+    return;
+  }
+  if (p.mode === 'ride') {
+    const mon = rideMonster(RIDE_BASE - p.on), f = mon && rideFrame(mon);
+    if (!f) return;
+    const base = mul(TR(f.pos[0], f.pos[1], f.pos[2]), RZ(f.yaw));
+    for (const [part, m] of avatarPose(base, { phase: 0, walk: 0, wave: 0, hold: 0, time, look: 0, swing: 0, climb: 0, down: 0, sword: false, ride: 1 })) draw(meshes[part], m);
+    return;
+  }
   const hold = p.mode === 'helm' || p.mode === 'harpoon' ? 1 : 0;
   const yaw = p.mode === 'helm' ? 0 : p.mode === 'harpoon' ? p.aimYaw : p.yaw;
   const px = p.mode === 'harpoon' ? HARPOON.x - Math.cos(p.aimYaw) * 1.9 : p.x, py = p.mode === 'harpoon' ? -Math.sin(p.aimYaw) * 1.9 : p.y;
@@ -1328,6 +1516,7 @@ function drawShip(e: ShipEnt) {
   draw(harpoonMesh, hm);
   if (e.harpoonCd <= 0 && !e.tether) draw(boltMesh, mul(hm, TR(0, 0, 0.35)));
   draw(wheelMesh, mul(model, TR(HELM.x, 0, HELM.z), RXm(e.ship.rudder * 3), SC(2.0, 2.0, 2.0)));
+  MASTS.forEach((mt, i) => draw(foldedWings, mul(model, TR(mt.x - mt.r + 0.1, 0, climbTop(i) - 1.6))));
   for (const p of [me, ...others.values()]) {
     if (p.on !== e.id || (p === me && (!playing || (camView === 'fp' && me.mode !== 'down') || me.mode === 'harpoon'))) continue;
     if (p === me && me.mode === 'helm' && camView !== 'tp') continue;
@@ -1358,6 +1547,12 @@ function render() {
   BUOYS.forEach((b, i) => draw(buoyMeshes[b.kind], buoyModels[i]));
   const visible = [...ships.values()].filter((e) => !(e.preview && playing) && Math.hypot(e.ship.x - cam.eye[0], e.ship.y - cam.eye[1]) < 3000);
   for (const e of visible) drawShip(e);
+  // Gliders and Leviathan riders live in world space.
+  for (const p of [me, ...others.values()]) {
+    if (p.on >= 0 || (p.mode !== 'glide' && p.mode !== 'ride')) continue;
+    if (p === me && (!playing || camView === 'fp')) continue;
+    drawAvatar(p, IDENT);
+  }
   for (const b of boards) {
     const ea = ships.get(b.a), eb = ships.get(b.b);
     if (!ea || !eb) continue;
@@ -1461,11 +1656,10 @@ function render() {
 function updateTags() {
   for (const o of others.values()) {
     if (!o.tag) { o.tag = document.createElement('div'); o.tag.className = 'tag'; tagsEl.appendChild(o.tag); }
-    const e = ships.get(o.on);
     const label = `${o.name}${o.mode === 'down' ? ' (down)' : ''}`;
     if (o.tag.textContent !== label) o.tag.textContent = label;
     o.tag.style.color = o.crew === me.crew ? COAT_CSS[o.color % COAT_CSS.length] : '#e0624a';
-    const head = e ? e.ship.local(o.x, o.y, o.z + 2.35) : null;
+    const w = playerWorld(o), head: V3 | null = w ? [w[0], w[1], w[2] + (o.mode === 'glide' ? 1.4 : 2.35)] : null;
     const s = head ? project(head, curVP) : null;
     const d = head ? dist3(head, cam.eye) : 1e9;
     if (s && d < 120 && playing) { o.tag.style.display = 'block'; o.tag.style.left = `${s[0]}px`; o.tag.style.top = `${s[1]}px`; o.tag.style.opacity = String(clamp(1.4 - d / 80, 0.3, 1)); }
@@ -1516,7 +1710,7 @@ net.onMsg = (m: NetMsg) => {
       if (!o) { o = newPlayer(from, String(m.n), Number(m.c)); others.set(from, o); if (playing && m.cr === me.crew) toast(`${o.name} came aboard`, 2.5); }
       o.name = String(m.n); o.color = Number(m.c); o.crew = m.cr as number; o.hp = m.hp as number; o.seen = now();
       const prevMode = o.mode;
-      o.mode = m.md as Mode; o.moving = !!m.mv; o.reel = !!m.rl; o.mast = (m.ms as number) ?? 0;
+      o.mode = m.md as Mode; o.moving = !!m.mv; o.reel = !!m.rl; o.mast = (m.ms as number) ?? 0; o.hookMask = (m.hk as number) ?? 0;
       if (o.snaps.length && o.snaps[o.snaps.length - 1].on !== m.on) o.snaps = [];
       o.snaps.push({ t: now(), x: m.x as number, y: m.y as number, z: m.z as number, yaw: m.yw as number, pitch: m.pt as number, ay: m.ay as number, ap: m.ap as number, on: m.on as number });
       if (o.snaps.length > 8) o.snaps.shift();
@@ -1567,6 +1761,7 @@ net.onMsg = (m: NetMsg) => {
     case 'unboard': onUnboard(m.a as number, m.b as number); break;
     case 'slash': { audio.cut(0); takeDamage(m.dmg as number, `${others.get(from)?.name ?? 'A pirate'} cut you down`); break; }
     case 'ev': { const e = ships.get(m.sid as number); if (e && !owns(e)) e.ship.events.push({ type: m.k as ShipEvent['type'], i: m.i as number }); break; }
+    case 'steer': if (isWorldHost()) monsters.steer(m.m as number, from, m.rs as number, m.tu as number, m.ga as number); break;
     case 'wreck': if ((m.sid as number) === me.on) showWreck(); break;
     case 'boss': toast('The Leviathan rises!', 4); break;
   }
@@ -1597,7 +1792,7 @@ function netSend(dt: number) {
   sendT += dt; shipT += dt; monT += dt;
   if (playing && sendT > 1 / 15) {
     sendT = 0;
-    net.send({ t: 'p', n: me.name, c: me.color, cr: me.crew, on: me.on, x: +me.x.toFixed(2), y: +me.y.toFixed(2), z: +me.z.toFixed(2), yw: +me.yaw.toFixed(3), pt: +me.pitch.toFixed(3), md: me.mode, mv: me.moving ? 1 : 0, wv: me.wave > 1.5 ? 1 : 0, sw: me.swing > 0 && me.swing < 0.2 ? 1 : 0, ay: +me.aimYaw.toFixed(3), ap: +me.aimPitch.toFixed(3), hp: Math.round(me.hp), rl: me.reel ? 1 : 0, ms: me.mast });
+    net.send({ t: 'p', n: me.name, c: me.color, cr: me.crew, on: me.on, x: +me.x.toFixed(2), y: +me.y.toFixed(2), z: +me.z.toFixed(2), yw: +me.yaw.toFixed(3), pt: +me.pitch.toFixed(3), md: me.mode, mv: me.moving ? 1 : 0, wv: me.wave > 1.5 ? 1 : 0, sw: me.swing > 0 && me.swing < 0.2 ? 1 : 0, ay: +me.aimYaw.toFixed(3), ap: +me.aimPitch.toFixed(3), hp: Math.round(me.hp), rl: me.reel ? 1 : 0, ms: me.mast, hk: me.hookMask });
     const e = onShip();
     if (e && !owns(e) && me.mode === 'helm') net.to(e.owner, { t: 'in', sid: e.id, r: +helmRudder.toFixed(3), s: +helmSail.toFixed(3) });
   }
@@ -1757,7 +1952,7 @@ function frame(nowMs: number) {
   updateHud(dt);
   netSend(dt);
   const f = focusShip();
-  audio.update({ speed: Math.min(Math.hypot(f.vx, f.vy) / 8, 1), storm: 0.15 + 0.85 * atm.s, rain: atm.rain, wind: atm.wind, heave: Math.abs(f.vz), roll: Math.abs(f.phv) }, dt);
+  audio.update({ speed: me.mode === 'glide' ? Math.min(Math.hypot(me.gv[0], me.gv[1], me.gv[2]) / 25, 1) : Math.min(Math.hypot(f.vx, f.vy) / 8, 1), storm: 0.15 + 0.85 * atm.s, rain: atm.rain, wind: atm.wind, heave: Math.abs(f.vz), roll: Math.abs(f.phv) }, dt);
   if (!playing) updateLobby();
   requestAnimationFrame(frame);
 }

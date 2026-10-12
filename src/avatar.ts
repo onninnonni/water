@@ -2,7 +2,7 @@
 import { MeshBuilder, V3 } from './mesh';
 import { Mat4, multiply } from './mat4';
 
-export interface AvatarParts { leg: number[]; torso: number[]; arm: number[]; head: number[]; sword: number[]; }
+export interface AvatarParts { leg: number[]; torso: number[]; arm: number[]; head: number[]; sword: number[]; wings: number[]; hook: number[]; }
 export function buildAvatarParts(coat: V3): AvatarParts {
   const SKIN: V3 = [0.72, 0.52, 0.4], BOOT: V3 = [0.07, 0.05, 0.04], PANTS: V3 = [0.32, 0.28, 0.22];
   const leg = new MeshBuilder();
@@ -26,7 +26,34 @@ export function buildAvatarParts(coat: V3): AvatarParts {
   sword.box(-0.03, 0.03, -0.03, 0.03, -0.06, 0.06, [0.2, 0.12, 0.06]);
   sword.box(0.02, 0.05, -0.09, 0.09, -0.02, 0.02, [0.6, 0.5, 0.2]);
   sword.quad([0.05, 0, -0.025], [0.85, 0, -0.03], [0.9, 0, 0.02], [0.05, 0, 0.035], [0.78, 0.8, 0.84]);
-  return { leg: leg.data, torso: torso.data, arm: arm.data, head: head.data, sword: sword.data };
+  return { leg: leg.data, torso: torso.data, arm: arm.data, head: head.data, sword: sword.data, wings: buildWings(true), hook: buildHook() };
+}
+
+// Elytra-style wings: a pair of ribbed canvas membranes. Open: spread out to the sides from the
+// shoulders (along ±y) in the plane of the back, trailing toward the feet. Folded: hanging flat
+// down the back.
+export function buildWings(open: boolean): number[] {
+  const m = new MeshBuilder();
+  const SAIL: V3 = [0.78, 0.72, 0.6], RIB: V3 = [0.22, 0.15, 0.09];
+  for (const sd of [1, -1]) {
+    const pts: V3[] = open
+      ? [[-0.2, sd * 0.18, 1.45], [-0.26, sd * 1.25, 1.6], [-0.32, sd * 2.3, 1.42], [-0.32, sd * 1.95, 0.95], [-0.29, sd * 1.05, 0.62], [-0.25, sd * 0.25, 0.5]]
+      : [[-0.18, sd * 0.12, 1.5], [-0.24, sd * 0.42, 1.4], [-0.26, sd * 0.5, 0.6], [-0.24, sd * 0.4, 0.15], [-0.2, sd * 0.25, 0.2], [-0.19, sd * 0.1, 0.7]];
+    for (let k = 1; k < pts.length - 1; k++) m.tri(pts[0], pts[k], pts[k + 1], SAIL);
+    for (let k = 1; k < pts.length - 1; k++) m.tri(pts[0], pts[k + 1], pts[k], SAIL);
+    for (const k of [1, 2, 3]) m.tube(pts[0], pts[k], 0.025, 0.02, 3, RIB);
+  }
+  return m.data;
+}
+
+// A maker hook: a staff with a curved iron hook, held point-down along −z of the hand frame.
+function buildHook(): number[] {
+  const m = new MeshBuilder();
+  const WOOD: V3 = [0.3, 0.2, 0.11], IRON: V3 = [0.32, 0.33, 0.35];
+  m.tube([0, 0, 0.35], [0, 0, -1.25], 0.035, 0.035, 5, WOOD);
+  m.tube([0, 0, -1.25], [0.12, 0, -1.5], 0.03, 0.025, 4, IRON);
+  m.tube([0.12, 0, -1.5], [0.28, 0, -1.42], 0.025, 0.015, 4, IRON);
+  return m.data;
 }
 
 const T = (x: number, y: number, z: number): Mat4 => new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1]);
@@ -42,10 +69,33 @@ export interface Anim {
   climb: number;   // 0 or 1
   down: number;    // 0..1 knocked down
   sword: boolean;
+  glide?: number;  // 0..1 flying prone with wings out
+  ride?: number;   // 0..1 crouched on the Leviathan, a hook in each hand
 }
 // Returns [part, matrix] pairs; base = ship model * T(feet) * RZ(yaw).
 export function avatarPose(base: Mat4, a: Anim): [keyof AvatarParts, Mat4][] {
   const out: [keyof AvatarParts, Mat4][] = [];
+  if (a.glide) {
+    // Prone, head first (+x), arms swept back along the body, wings spread.
+    const b = M(base, T(0, 0, 1.0), RY(Math.PI / 2), T(0, 0, -1.0));
+    const flap = Math.sin(a.time * 2.2) * 0.05;
+    out.push(['leg', M(b, T(0, 0.13, 0.95), RY(0.1))], ['leg', M(b, T(0, -0.13, 0.95), RY(-0.08))]);
+    out.push(['torso', b], ['head', M(b, T(0, 0, 1.58), RY(-0.9), T(0, 0, -1.58))]);
+    out.push(['arm', M(b, T(0, 0.33, 1.5), RX(-0.35 - flap))], ['arm', M(b, T(0, -0.33, 1.5), RX(0.35 + flap))]);
+    out.push(['wings', b]);
+    return out;
+  }
+  if (a.ride) {
+    // Crouched, leaning back on two hooks driven into the hide ahead of the feet.
+    const b = M(base, T(0, 0, -0.35));
+    out.push(['leg', M(b, T(0, 0.15, 0.95), RY(-0.9))], ['leg', M(b, T(0, -0.15, 0.95), RY(0.5))]);
+    out.push(['torso', M(b, T(0, 0, 0.72), RY(-0.25), T(0, 0, -0.72))], ['head', b]);
+    for (const sd of [1, -1]) {
+      const arm = M(b, T(0, sd * 0.33, 1.5), RY(-1.1), RX(-sd * 0.15));
+      out.push(['arm', arm], ['hook', M(arm, T(0, 0, -0.62), RY(0.45))]);
+    }
+    return out;
+  }
   // Knocked down: lying on the back.
   const b0 = a.down > 0 ? M(base, T(0, 0, 0.18 * a.down), RY(-a.down * Math.PI / 2), T(-0.9 * a.down, 0, 0)) : base;
   const climbSwing = a.climb ? Math.sin(a.phase) : 0;
