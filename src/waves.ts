@@ -1,6 +1,6 @@
 // Deep-water Gerstner sea shared by the GPU (rendering) and the CPU (buoyancy).
 // Long swell is huge out in the storm and nearly flat near the island; short chop stays a little.
-import { stormAt, bayAt, smoothstep, WIND_DIR } from './world';
+import { stormAt, bayAt, rogueAt, ROGUE, smoothstep, WIND_DIR } from './world';
 
 export const NW = 12;
 const LAMBDA = [300, 220, 160, 118, 92, 70, 52, 38, 27, 19, 13, 9];
@@ -32,22 +32,24 @@ export function updatePhases(t: number) {
 }
 
 // Amplitude multipliers for long swell and short chop at a rest position.
-export function ampMuls(x: number, y: number): [number, number] {
-  const s = stormAt(x, y), bay = bayAt(x, y);
-  return [0.04 + 1.6 * s, (0.22 + 0.78 * s) * (1 - 0.55 * bay)];
+// The third value scales the Gerstner sharpness down where the swell is boosted (the Rogue Sea),
+// so the giant waves stay steep but never loop over themselves.
+export function ampMuls(x: number, y: number): [number, number, number] {
+  const s = stormAt(x, y), bay = bayAt(x, y), g = 1 + ROGUE.gain * rogueAt(x, y);
+  return [(0.04 + 1.6 * s) * g, (0.22 + 0.78 * s) * (1 - 0.55 * bay), 1 / g];
 }
 
 export interface WSample { dx: number; dy: number; z: number; vx: number; vy: number; vz: number; }
 export const newSample = (): WSample => ({ dx: 0, dy: 0, z: 0, vx: 0, vy: 0, vz: 0 });
 
 function evalAt(x0: number, y0: number, o: WSample) {
-  const [ml, ms] = ampMuls(x0, y0);
+  const [ml, ms, qs] = ampMuls(x0, y0);
   o.dx = o.dy = o.z = o.vx = o.vy = o.vz = 0;
   for (let i = 0; i < NW; i++) {
     const w = WAVES[i];
     const A = w.A * (ms + (ml - ms) * w.swell);
     const th = w.k * (w.dx * x0 + w.dy * y0) + phaseT[i];
-    const c = Math.cos(th), s = Math.sin(th), qa = w.Q * A;
+    const c = Math.cos(th), s = Math.sin(th), qa = w.Q * qs * A;
     o.dx += qa * w.dx * c; o.dy += qa * w.dy * c; o.z += A * s;
     o.vx += qa * w.dx * w.w * s; o.vy += qa * w.dy * w.w * s; o.vz -= A * w.w * c;
   }

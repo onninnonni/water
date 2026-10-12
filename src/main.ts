@@ -1,6 +1,6 @@
 import * as S from './shaders';
 import { Mat4, perspective, lookAt, multiply } from './mat4';
-import { IC, SUN_DIR, WIND_DIR, clamp, mix, mix3, smoothstep, stormAt, norm3 } from './world';
+import { IC, SUN_DIR, WIND_DIR, ROGUE, clamp, mix, mix3, smoothstep, stormAt, rogueAt, norm3 } from './world';
 import { uWA, uWB, updatePhases, sampleWater, newSample, sigWaveHeight } from './waves';
 import { buildLand, buildShoreMap, buildBuoy, terrainHeight, PILLARS, ARCH, LIGHTHOUSE, BUOYS, SHORE, BUOY_COLS } from './island';
 import {
@@ -217,6 +217,7 @@ interface ShipEnt {
   recoil: number[]; cannonCd: number[]; harpoonCd: number; tether: Tether | null;
   snap: { tm: number; sh: number[] } | null; inited: boolean; seen: number; remote: { rudder: number; sail: number };
   marks: number[][]; preview?: boolean; wreckT: number; hitCd: number; captain: string;
+  home?: SpawnMode; // where she respawns after a wreck
   ghost?: boolean; cave?: boolean; // the ghost ship from the Leviathan's lair; cave = still down there (not broadcast)
 }
 interface Board { a: number; b: number; pa: [number, number]; pb: [number, number]; }
@@ -294,8 +295,10 @@ function updateAtmosphere(dt: number) {
   atm.wind = mix(0.2, 1, a);
 }
 
-const SPAWNS = { shelter: { x: 0, y: -260, psi: -Math.PI / 2, r: 120 }, storm: { x: 1900, y: -3300, psi: 2.3, r: 260 } };
-function placeShip(e: ShipEnt, mode: 'shelter' | 'storm', jitter: boolean) {
+type SpawnMode = 'shelter' | 'storm' | 'rogue';
+const SPAWNS = { shelter: { x: 0, y: -260, psi: -Math.PI / 2, r: 120 }, storm: { x: 1900, y: -3300, psi: 2.3, r: 260 }, rogue: { x: ROGUE.x, y: ROGUE.y, psi: 0.6, r: 400 } };
+function placeShip(e: ShipEnt, mode: SpawnMode, jitter: boolean) {
+  e.home = mode;
   const s = SPAWNS[mode];
   let x = s.x, y = s.y;
   if (jitter) for (let k = 0; k < 20; k++) {
@@ -305,7 +308,7 @@ function placeShip(e: ShipEnt, mode: 'shelter' | 'storm', jitter: boolean) {
   }
   updatePhases(time);
   e.ship.place(x, y, s.psi);
-  e.ship.sail = mode === 'storm' ? 0.6 : 0; e.ship.sailSet = mode === 'storm' ? 0.6 : 0.08; e.ship.hull = 100;
+  e.ship.sail = mode !== 'shelter' ? 0.6 : 0; e.ship.sailSet = mode !== 'shelter' ? 0.6 : 0.08; e.ship.hull = 100;
   e.inited = true; e.marks = [[x, y], [x, y], [x, y]];
 }
 
@@ -490,7 +493,8 @@ function updateControls(dt: number) {
     const run = keys.has('Shift') || Math.hypot(sx, sy) > 0.95 ? 5.5 : 3.2;
     const c = Math.cos(me.yaw), s = Math.sin(me.yaw);
     const fx = c * my + s * mx, fy = s * my - c * mx, len = Math.hypot(fx, fy);
-    const slideX = -Math.sin(e.ship.th) * 2.2, slideY = -Math.sin(e.ship.ph) * 2.2;
+    const havoc = 1 + 3 * rogueAt(e.ship.x, e.ship.y);
+    const slideX = -Math.sin(e.ship.th) * 2.2 * havoc, slideY = -Math.sin(e.ship.ph) * 2.2 * havoc;
     const vx = (len > 0.01 ? fx / Math.max(len, 1) * run : 0) + slideX + stagger.x, vy = (len > 0.01 ? fy / Math.max(len, 1) * run : 0) + slideY + stagger.y;
     [me.x, me.y] = moveOnDeck(me.x, me.y, vx * dt / e.ship.scale, vy * dt / e.ship.scale);
     me.z = deckZ(me.x, me.y);
@@ -1619,7 +1623,7 @@ function updateHud(dt: number) {
   const cat = s < 0.06 ? 0 : s < 0.28 ? 1 : s < 0.52 ? 2 : s < 0.78 ? 3 : 4;
   if (cat !== seaCand) { seaCand = cat; seaCandT = 0; } else seaCandT += dt;
   if (seaCand !== seaState && (seaCandT > 1.5 || seaState < 0)) { if (seaState >= 0 && playing) toast(SEA_STATES[seaCand]); seaState = seaCand; }
-  seaEl.innerHTML = inCave() ? 'The Leviathan\'s lair' : `${SEA_STATES[Math.max(seaState, 0)]} · waves <b>${hs.toFixed(1)} m</b>`;
+  seaEl.innerHTML = inCave() ? 'The Leviathan\'s lair' : rogueAt(f.x, f.y) > 0.5 ? `The Rogue Sea · waves <b>${hs.toFixed(0)} m</b>` : `${SEA_STATES[Math.max(seaState, 0)]} · waves <b>${hs.toFixed(1)} m</b>`;
   leverFill.style.height = `${clamp(f.sail, 0, 1) * 100}%`;
   needle.style.left = `${50 - f.rudder * 45}%`;
   hullFill.style.width = `${f.hull}%`;
@@ -2069,6 +2073,7 @@ function handleShipEvents(e: ShipEnt) {
   // The owner's simulation produces the events; share them so the whole crew feels them.
   if (owns(e) && !e.preview && net.online) for (const ev of e.ship.events) net.send({ t: 'ev', sid: e.id, k: ev.type, i: +ev.i.toFixed(2) });
   for (const ev of e.ship.events) {
+    rogueHit(e, ev.type, ev.i);
     const d = dist3([e.ship.x, e.ship.y, e.ship.z], cam.eye);
     if (ev.type === 'slam') {
       if (d < 400) audio.slap(ev.i / (1 + d / 80));
@@ -2081,6 +2086,37 @@ function handleShipEvents(e: ShipEnt) {
     } else { audio.crunch(ev.i / (1 + d / 60)); if (me.on === e.id) { cam.shake = Math.max(cam.shake, 0.3 * ev.i); toast('Collision!', 1.5); } }
   }
   e.ship.events.length = 0;
+}
+
+// ---------- The Rogue Sea: havoc on deck ----------
+// Giant seas throw the crew about: past a violent roll or pitch you can be pitched over the rail,
+// torn from the wheel or shaken out of the rigging; green water and slams sweep the deck.
+function washOverboard(why: string) {
+  const w = playerWorld(me);
+  if (me.mode === 'helm') leaveHelm();
+  if (w) { burst(w, 80, 8, 8, 1.2); audio.splash(1, 0); }
+  me.mode = 'walk'; me.on = me.crew; me.x = -6; me.y = (R() - 0.5) * 3; me.z = MAIN_DECK; me.pitch = 0;
+  me.hp = Math.max(1, me.hp - 15); hurtFlash = 0.8; cam.shake = Math.max(cam.shake, 0.4);
+  toast(why, 2.5);
+}
+function updateHavoc(dt: number) {
+  const e = onShip();
+  if (!playing || !e || e.cave) return;
+  const rg = rogueAt(e.ship.x, e.ship.y);
+  if (rg < 0.2) return;
+  const roll = Math.abs(e.ship.ph), pitch = Math.abs(e.ship.th);
+  const violence = Math.max(0, roll - 0.5) + Math.max(0, pitch - 0.4);
+  if ((me.mode === 'walk' || me.mode === 'nest') && violence > 0 && R() < dt * violence * 0.35 * rg) washOverboard('Pitched over the rail! Hauled back aboard');
+  else if (me.mode === 'helm' && violence > 0.25 && R() < dt * violence * 3 * rg) { leaveHelm(); stagger.y = (R() - 0.5) * 8; toast('Torn from the wheel!', 2); }
+  else if (me.mode === 'climb' && violence > 0.1 && R() < dt * violence * 6 * rg) { me.mode = 'walk'; me.x = climbX(me.mast) - 0.6; me.y = 0; me.z = deckZ(me.x, 0); takeDamage(20, 'Shaken out of the rigging!'); toast('Shaken out of the rigging!', 2); }
+}
+function rogueHit(e: ShipEnt, type: string, i: number) {
+  if (me.on !== e.id || rogueAt(e.ship.x, e.ship.y) < 0.2) return;
+  if (type === 'green' && (me.mode === 'walk' || me.mode === 'nest') && R() < 0.06 * i) washOverboard('A sea swept you over the side! Hauled back aboard');
+  else if ((type === 'splash' || type === 'slam') && i > 0.5 && me.mode === 'walk') {
+    stagger.x = (type === 'splash' ? 6 : 3) * i; stagger.y = (R() - 0.5) * 6 * i;
+    if (type === 'splash') { me.hp = Math.max(1, me.hp - 12 * i); hurtFlash = 0.5 * i; }
+  }
 }
 
 // ---------- Splash-down ----------
@@ -2138,17 +2174,19 @@ function stepOwnedShip(e: ShipEnt, dt: number) {
     for (const b of boards.filter((x) => x.a === e.id || x.b === e.id)) { net.send({ t: 'unboard', a: b.a, b: b.b }); onUnboard(b.a, b.b); }
     e.tether = null;
   }
-  if (e.wreckT > 0) { e.wreckT -= dt; if (e.wreckT <= 0) { placeShip(e, 'shelter', true); e.score = 0; } }
+  if (e.wreckT > 0) { e.wreckT -= dt; if (e.wreckT <= 0) { placeShip(e, e.home === 'rogue' ? 'rogue' : 'shelter', true); e.score = 0; } }
 }
 
 function simulate(dt: number) {
   if (net.role === 'guest' && clockOffset !== null) time = now() + clockOffset; else time += dt;
   updatePhases(time);
   if (playing && me.mode !== 'down') updateControls(dt);
+  if (me.mode !== 'down' && me.hp < 100 && !inBoarding()) me.hp = Math.min(100, me.hp + 1.5 * dt); // slow recovery
   if (me.mode === 'down') { downT += dt; if (downT > 8 && !inBoarding()) revive(); }
   updatePlank(dt);
   for (const e of ships.values()) { if (e.cave) updateCaveShip(e, dt); else if (owns(e) || e.preview) stepOwnedShip(e, dt); else remoteShipUpdate(e, dt); handleShipEvents(e); }
   updateDeep(dt);
+  updateHavoc(dt);
   updateTethers(dt);
   updateBoardsAndCollisions(dt);
   if (isWorldHost()) {
@@ -2215,10 +2253,11 @@ let savedName = '';
 try { savedName = localStorage.getItem('seas-name') ?? ''; } catch { /* storage blocked */ }
 nameEl.value = savedName || `${PIRATE[Math.floor(R() * PIRATE.length)]} ${NAMES[Math.floor(R() * NAMES.length)]}`;
 const inviteShip = Number(new URLSearchParams(location.search).get('ship') ?? 0);
-let spawnMode: 'shelter' | 'storm' = 'shelter';
-const setSpawn = (m: 'shelter' | 'storm') => { spawnMode = m; $('spShelter').classList.toggle('on', m === 'shelter'); $('spStorm').classList.toggle('on', m === 'storm'); };
+let spawnMode: SpawnMode = 'shelter';
+const setSpawn = (m: SpawnMode) => { spawnMode = m; $('spShelter').classList.toggle('on', m === 'shelter'); $('spStorm').classList.toggle('on', m === 'storm'); $('spRogue').classList.toggle('on', m === 'rogue'); };
 $('spShelter').addEventListener('click', () => setSpawn('shelter'));
 $('spStorm').addEventListener('click', () => setSpawn('storm'));
+$('spRogue').addEventListener('click', () => setSpawn('rogue'));
 const statusEl = $('status'), crewsEl = $('crews');
 let lobbyKey = '', lobbyT = 0;
 function updateLobby() {
@@ -2259,7 +2298,7 @@ function sailOwn() {
   me.crew = me.on = e.id; me.color = 0; me.x = -7; me.y = -1.2;
   begin();
   if (WORLD_ROOM === 'WORLD1') history.replaceState(null, '', location.pathname);
-  toast(spawnMode === 'storm' ? 'High seas' : 'Sheltered water', 3);
+  toast(spawnMode === 'rogue' ? 'The Rogue Sea' : spawnMode === 'storm' ? 'High seas' : 'Sheltered water', 3);
 }
 function joinCrew(sid: number) {
   const e = ships.get(sid);
@@ -2307,5 +2346,5 @@ dev.__advance = (n: number, dt = 1 / 60) => {
 dev.__game = {
   get boards() { return boards; }, enterLair, sound, jump, fires, addFire, surge, ships, me, others, monsters, keys, cam, atm, net, shots, sailOwn, joinCrew, interact, fireAction, toggleCam, wave, slash, cutGangplank,
   setSpawn, look: (dx: number, dy: number) => { look.dx += dx; look.dy += dy; }, reel: (v: boolean) => { reelHeld = v; },
-  ship: () => onShip(), place: (mode: 'shelter' | 'storm') => { const e = crewShip(); if (e) placeShip(e, mode, false); },
+  ship: () => onShip(), place: (mode: SpawnMode) => { const e = crewShip(); if (e) placeShip(e, mode, false); },
 };

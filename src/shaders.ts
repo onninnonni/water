@@ -41,6 +41,7 @@ uniform vec4 uWA[NW];
 uniform vec4 uWB[NW];
 uniform vec3 uIsland;
 float stormAt(vec2 p){ return smoothstep(600.0, 3000.0, length(p - uIsland.xy)); }
+float rogueAt(vec2 p){ return 1.0 - smoothstep(1430.0, 3640.0, length(p - vec2(0.0, -30000.0))); } // ROGUE in world.ts
 float bayAt(vec2 p){ return 1.0 - smoothstep(uIsland.z - 140.0, uIsland.z - 30.0, length(p - uIsland.xy)); }
 `;
 
@@ -113,15 +114,16 @@ void main(){
   vec2 p0 = uCenter + aGrid.xy;
   float sp = aGrid.z;
   float s = stormAt(p0), bay = bayAt(p0);
-  float ml = 0.04 + 1.6*s, ms = (0.22 + 0.78*s)*(1.0 - 0.55*bay);
+  float g = 1.0 + 4.5*rogueAt(p0), qs = 1.0/g; // ROGUE.gain
+  float ml = (0.04 + 1.6*s)*g, ms = (0.22 + 0.78*s)*(1.0 - 0.55*bay);
   vec3 D = vec3(0.0); vec3 N = vec3(0.0, 0.0, 1.0); float crest = 0.0;
   for (int i = 0; i < NW; i++){
     vec4 A = uWA[i], B = uWB[i];
     float amp = A.w * mix(ms, ml, B.z) * (1.0 - smoothstep(B.w/6.0, B.w/3.0, sp));
     float th = A.z*dot(A.xy, p0) + B.y;
-    float c = cos(th), sn = sin(th), qa = B.x*amp, wa = A.z*amp;
+    float c = cos(th), sn = sin(th), qa = B.x*qs*amp, wa = A.z*amp;
     D.xy += qa*A.xy*c; D.z += amp*sn;
-    N.xy -= A.xy*wa*c; N.z -= B.x*wa*sn; crest += B.x*wa*sn;
+    N.xy -= A.xy*wa*c; N.z -= B.x*qs*wa*sn; crest += B.x*qs*wa*sn;
   }
   vPos = vec3(p0 + D.xy, D.z); vN = N; vCrest = crest; vP0 = p0; vStorm = s;
   gl_Position = uVP*vec4(vPos, 1.0);
