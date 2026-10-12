@@ -5,7 +5,7 @@ import { uWA, uWB, updatePhases, sampleWater, newSample, sigWaveHeight } from '.
 import { buildLand, buildShoreMap, buildBuoy, PILLARS, ARCH, LIGHTHOUSE, BUOYS, SHORE, BUOY_COLS } from './island';
 import {
   Ship, shipAxes, buildShipMesh, buildSailMesh, buildCannonMesh, buildHarpoonMesh, buildBoltMesh, buildBallMesh, buildWheelMesh,
-  MASTS, CANNONS, HELM, HARPOON, deckZ, moveOnDeck, halfBeam, climbX, climbTop, railPoint, hullContains, HULL_CIRCLES, MAIN_DECK,
+  MASTS, CANNONS, HELM, HARPOON, deckZ, moveOnDeck, halfBeam, climbX, climbTop, nestZ, moveOnNest, railPoint, hullContains, HULL_CIRCLES, MAIN_DECK,
 } from './ship';
 import { buildAvatarParts, avatarPose, RZ, TR, AvatarParts } from './avatar';
 import { MonsterSystem, Monster, MS, segRadius, buildSegmentMesh, buildHeadMesh, BOSS_POS } from './monsters';
@@ -230,7 +230,7 @@ function newShipEnt(id: number, owner: number, name: string, captain: string): S
 }
 const shipName = (id: number) => SHIP_NAMES[id % SHIP_NAMES.length];
 
-type Mode = 'walk' | 'helm' | 'harpoon' | 'climb' | 'plank' | 'down';
+type Mode = 'walk' | 'helm' | 'harpoon' | 'climb' | 'nest' | 'plank' | 'down';
 interface Player {
   id: number; name: string; color: number; crew: number; on: number; x: number; y: number; z: number; yaw: number; pitch: number; mode: Mode;
   hp: number; walk: number; phase: number; wave: number; aimYaw: number; aimPitch: number; moving: boolean; swing: number; mast: number;
@@ -344,7 +344,11 @@ function interact() {
   const e = onShip();
   if (me.mode === 'helm') { leaveHelm(); return; }
   if (me.mode === 'harpoon') { me.mode = 'walk'; me.x = HARPOON.x - 1.9; me.y = 0; reelHeld = false; return; }
-  if (me.mode === 'climb') { me.mode = 'walk'; me.x = climbX(me.mast) - 0.6; me.y = 0; toast('You slide down the mast', 1.5); return; }
+  if (me.mode === 'climb') {
+    if (Math.abs(me.z - nestZ(me.mast)) < 1.2) { me.mode = 'nest'; me.z = nestZ(me.mast); [me.x, me.y] = moveOnNest(me.mast, me.x, me.y, -0.3, 0); me.yaw = Math.PI; toast('On the platform', 1.5); return; }
+    me.mode = 'walk'; me.x = climbX(me.mast) - 0.6; me.y = 0; toast('You slide down the mast', 1.5); return;
+  }
+  if (me.mode === 'nest') { me.mode = 'climb'; me.x = climbX(me.mast); me.y = 0; me.z = nestZ(me.mast) + 0.2; return; }
   const t = interactTarget();
   if (!t || t.idx < 0 || !e) return;
   if (t.kind === 'helm') {
@@ -374,7 +378,7 @@ function fireAction() {
   }
   const t = interactTarget();
   if (t && t.kind === 'cannon') { fire('c', t.idx); return; }
-  if (me.mode === 'walk') slash();
+  if (me.mode === 'walk' || me.mode === 'nest') slash();
 }
 function wave() { me.wave = 1.6; }
 function toggleCam() { camView = camView === 'fp' ? 'tp' : 'fp'; }
@@ -460,6 +464,17 @@ function updateControls(dt: number) {
     const vx = (len > 0.01 ? fx / Math.max(len, 1) * run : 0) + slideX, vy = (len > 0.01 ? fy / Math.max(len, 1) * run : 0) + slideY;
     [me.x, me.y] = moveOnDeck(me.x, me.y, vx * dt, vy * dt);
     me.z = deckZ(me.x, me.y);
+    me.moving = len > 0.05;
+    me.walk += ((me.moving ? 1 : 0) - me.walk) * (1 - Math.exp(-dt * 8));
+    if (me.moving) me.phase += dt * run * 2.4;
+  } else if (me.mode === 'nest' && e) {
+    // Standing on a mast platform: walk around the mast; the roll of the ship pushes you about.
+    const run = 2.4, c = Math.cos(me.yaw), s = Math.sin(me.yaw);
+    const fx = c * my + s * mx, fy = s * my - c * mx, len = Math.hypot(fx, fy);
+    const sway = 2.4 * (me.z / 20);
+    const vx = (len > 0.01 ? fx / Math.max(len, 1) * run : 0) - Math.sin(e.ship.th) * sway, vy = (len > 0.01 ? fy / Math.max(len, 1) * run : 0) - Math.sin(e.ship.ph) * sway;
+    [me.x, me.y] = moveOnNest(me.mast, me.x, me.y, vx * dt, vy * dt);
+    me.z = nestZ(me.mast);
     me.moving = len > 0.05;
     me.walk += ((me.moving ? 1 : 0) - me.walk) * (1 - Math.exp(-dt * 8));
     if (me.moving) me.phase += dt * run * 2.4;
@@ -601,7 +616,7 @@ function updateCamera(dt: number) {
   cam.shake *= Math.exp(-dt * 5);
   const jit = () => (Math.random() - 0.5) * cam.shake;
   const e = onShip();
-  document.body.classList.toggle('fp', playing && camView === 'fp' && (me.mode === 'walk' || me.mode === 'climb' || me.mode === 'harpoon'));
+  document.body.classList.toggle('fp', playing && camView === 'fp' && (me.mode === 'walk' || me.mode === 'climb' || me.mode === 'nest' || me.mode === 'harpoon'));
   if (!playing || !e) {
     const f = focusShip();
     const a = Math.PI / 2 + 0.35 + time * 0.03, R = 70;
@@ -1210,15 +1225,19 @@ function updateHud(dt: number) {
   const cut = canCut();
   if (me.mode === 'helm') msg = (isTouch ? 'Stick: steer and set sail · Use: leave' : '<kbd>W</kbd>/<kbd>S</kbd> sails · <kbd>A</kbd>/<kbd>D</kbd> helm · <kbd>C</kbd> overview · <kbd>E</kbd> leave') + (cut ? ' · <kbd>G</kbd> cut her loose' : '');
   if (me.mode === 'harpoon') msg = e?.tether ? (isTouch ? 'Hold Reel to haul in · Fire to rip it out' : 'Hold <kbd>R</kbd> or right mouse to reel in · <kbd>Click</kbd> rip it out') : e && e.harpoonCd > 0 ? 'Reloading…' : isTouch ? 'Drag to aim · Fire' : 'Mouse to aim · <kbd>Click</kbd> fire · <kbd>E</kbd> leave';
-  if (me.mode === 'climb') msg = isTouch ? 'Stick up and down to climb · Use: slide down' : '<kbd>W</kbd>/<kbd>S</kbd> climb · <kbd>E</kbd> slide down';
+  if (me.mode === 'climb') {
+    const atNest = Math.abs(me.z - nestZ(me.mast)) < 1.2;
+    msg = isTouch ? (atNest ? 'Use: step onto the platform' : 'Stick up and down to climb · Use: slide down') : atNest ? '<kbd>E</kbd> step onto the platform · <kbd>W</kbd>/<kbd>S</kbd> climb' : '<kbd>W</kbd>/<kbd>S</kbd> climb · <kbd>E</kbd> slide down';
+  }
+  if (me.mode === 'nest') msg = isTouch ? 'Use: back onto the mast' : '<kbd>E</kbd> back onto the mast';
   if (me.mode === 'down') msg = inBoarding() ? 'You are down until the boarding is settled' : `Recovering… ${Math.max(0, Math.ceil(8 - downT))}`;
   if (isTouch) msg = msg.replace(/<kbd>(Click|E|G)<\/kbd> /g, '');
   promptEl.innerHTML = msg; promptEl.classList.toggle('show', !!msg && playing);
   const fireLabel = me.mode === 'harpoon' ? (e?.tether ? 'Rip' : 'Fire') : t?.kind === 'cannon' ? 'Fire' : 'Slash';
   $('fireT').textContent = fireLabel;
-  $('fireT').style.display = me.mode === 'walk' || me.mode === 'harpoon' ? 'block' : 'none';
+  $('fireT').style.display = me.mode === 'walk' || me.mode === 'nest' || me.mode === 'harpoon' ? 'block' : 'none';
   $('actT').style.display = ((t && t.idx >= 0 && t.kind !== 'cannon') || (me.mode !== 'walk' && me.mode !== 'down' && me.mode !== 'plank')) ? 'block' : 'none';
-  $('actT').textContent = me.mode === 'walk' ? ({ helm: 'Wheel', harpoon: 'Harpoon', climb: 'Climb', plank: 'Cross', board: 'Gangplank', cannon: 'Fire' } as Record<string, string>)[t?.kind ?? 'helm'] : me.mode === 'climb' ? 'Down' : 'Leave';
+  $('actT').textContent = me.mode === 'walk' ? ({ helm: 'Wheel', harpoon: 'Harpoon', climb: 'Climb', plank: 'Cross', board: 'Gangplank', cannon: 'Fire' } as Record<string, string>)[t?.kind ?? 'helm'] : me.mode === 'climb' ? (Math.abs(me.z - nestZ(me.mast)) < 1.2 ? 'Step off' : 'Down') : me.mode === 'nest' ? 'Mast' : 'Leave';
   $('reelT').style.display = me.mode === 'harpoon' && e?.tether ? 'block' : 'none';
   $('cutT').style.display = cut ? 'block' : 'none';
   if (toastTimer > 0) { toastTimer -= dt; if (toastTimer <= 0) toastEl.classList.remove('show'); }
@@ -1268,7 +1287,7 @@ function drawAvatar(p: Player, model: Mat4) {
   const px = p.mode === 'harpoon' ? HARPOON.x - Math.cos(p.aimYaw) * 1.9 : p.x, py = p.mode === 'harpoon' ? -Math.sin(p.aimYaw) * 1.9 : p.y;
   const pz = p.mode === 'harpoon' ? deckZ(px, py) : p.z;
   const base = mul(model, TR(px, py, pz), RZ(yaw));
-  const anim = { phase: p.phase, walk: p.walk, wave: Math.min(p.wave, 1), hold, time, look: p.mode === 'walk' ? p.pitch : 0, swing: p.swing, climb: p.mode === 'climb' ? 1 : 0, down: p.mode === 'down' ? 1 : 0, sword: p.mode === 'walk' || p.mode === 'plank' };
+  const anim = { phase: p.phase, walk: p.walk, wave: Math.min(p.wave, 1), hold, time, look: p.mode === 'walk' || p.mode === 'nest' ? p.pitch : 0, swing: p.swing, climb: p.mode === 'climb' ? 1 : 0, down: p.mode === 'down' ? 1 : 0, sword: p.mode === 'walk' || p.mode === 'nest' || p.mode === 'plank' };
   for (const [part, m] of avatarPose(base, anim)) draw(meshes[part], m);
 }
 function project(p: V3, vp: Mat4): [number, number] | null {
@@ -1576,7 +1595,7 @@ function onRamMsg(sid: number, p: V3, boss: boolean) {
   }
   const d = dist3(p, cam.eye);
   audio.crunch(1 / (1 + d / 60)); audio.roar(d);
-  if (me.on === sid) { cam.shake = Math.max(cam.shake, boss ? 0.6 : 0.35); toast(boss ? 'The Leviathan strikes!' : 'Rammed!', 1.8); if (boss && me.mode === 'climb') { me.mode = 'walk'; me.x = climbX(me.mast) - 0.6; me.y = 0; me.z = deckZ(me.x, 0); takeDamage(25, 'Thrown from the rigging!'); } }
+  if (me.on === sid) { cam.shake = Math.max(cam.shake, boss ? 0.6 : 0.35); toast(boss ? 'The Leviathan strikes!' : 'Rammed!', 1.8); if (boss && (me.mode === 'climb' || me.mode === 'nest')) { me.mode = 'walk'; me.x = climbX(me.mast) - 0.6; me.y = 0; me.z = deckZ(me.x, 0); takeDamage(25, 'Thrown from the rigging!'); } }
   burst(p, boss ? 220 : 100, boss ? 20 : 12, boss ? 22 : 14, 1.4);
 }
 

@@ -59,6 +59,19 @@ export function moveOnDeck(x: number, y: number, dx: number, dy: number): [numbe
 // Climbing: a walker goes up the aft face of a mast from the deck to near its top.
 export const climbX = (i: number) => MASTS[i].x - MASTS[i].r - 0.4;
 export const climbTop = (i: number) => MASTS[i].top - 1.6;
+// Platforms (tops) on each mast: a railed ring you can stand on. The forward edge stops short of
+// the sails hanging just ahead of the mast.
+export const NEST_R = 2.3;
+export const nestZ = (i: number) => MASTS[i].yards[0].z + 3;
+export function moveOnNest(i: number, x: number, y: number, dx: number, dy: number): [number, number] {
+  const m = MASTS[i];
+  let lx = x + dx - m.x, ly = y + dy;
+  lx = Math.min(lx, 0.35);
+  const d = Math.hypot(lx, ly), rMin = m.r + 0.35, rMax = NEST_R - 0.4;
+  if (d < rMin) { const k = rMin / Math.max(d, 1e-3); lx *= k; ly *= k; if (lx > 0.35) { lx = 0.35; ly = Math.sign(ly || 1) * Math.sqrt(rMin * rMin - lx * lx); } }
+  if (d > rMax) { const k = rMax / d; lx *= k; ly *= k; }
+  return [m.x + lx, ly];
+}
 // Rail point on the main deck for a gangplank, just inside the bulwark.
 export const railPoint = (x: number, side: number): [number, number] => [clamp(x, -8.5, 10.5), side * (halfBeam(clamp(x, -8.5, 10.5)) - 0.75)];
 export function hullContains(l: V3, pad = 0): boolean {
@@ -144,7 +157,16 @@ export function buildShipMesh(): number[] {
     m.tube([mt.x, 0, mt.base - 0.1], [mt.x, 0, mt.top], mt.r, mt.r * 0.5, 10, MAST);
     for (const y of mt.yards) m.tube([mt.x + 0.5, -y.w / 2 - 0.4, y.z], [mt.x + 0.5, y.w / 2 + 0.4, y.z], 0.22, 0.22, 6, MAST);
     const nest = mt.yards[0].z + 3;
-    m.cyl(mt.x, 0, nest - 0.35, nest, 1.6, 1.6, 12, WOOD_DARK);
+    m.cyl(mt.x, 0, nest - 0.35, nest, NEST_R, NEST_R, 16, WOOD_DARK);
+    // Railing: posts and a top rail around the platform.
+    const RN = 14, rr = NEST_R - 0.12;
+    for (let k = 0; k < RN; k++) {
+      const a0 = (k / RN) * Math.PI * 2, a1 = ((k + 1) / RN) * Math.PI * 2;
+      const p0: V3 = [mt.x + Math.cos(a0) * rr, Math.sin(a0) * rr, nest], p1: V3 = [mt.x + Math.cos(a1) * rr, Math.sin(a1) * rr, nest];
+      m.tube(p0, [p0[0], p0[1], nest + 1.05], 0.05, 0.05, 4, WOOD_DARK);
+      m.tube([p0[0], p0[1], nest + 1.05], [p1[0], p1[1], nest + 1.05], 0.06, 0.06, 4, WOOD_DARK);
+      m.tube([p0[0], p0[1], nest + 0.5], [p1[0], p1[1], nest + 0.5], 0.035, 0.035, 3, ROPE);
+    }
     for (const s of [1, -1]) for (let k = -1; k <= 1; k++) {
       const bx = mt.x + k * 1.1;
       m.tube([bx, s * (halfBeam(bx) * 0.95), gunZ(bx)], [mt.x, s * 1.3, nest - 0.3], 0.045, 0.045, 4, ROPE);

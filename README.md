@@ -15,7 +15,8 @@ Live: https://onnin.no · The original 2D fluid simulator: https://pikos.org/juh
 - **On deck:** `WASD` walk, mouse to look (click to capture it), `Shift` run, `C` first/third person,
   `Q` wave. Stand at a cannon and click to fire it; anywhere else a click swings your cutlass.
 - **The wheel:** `E` on the quarterdeck. `W`/`S` set or furl sail, `A`/`D` steer, `C` overview.
-- **Masts:** `E` at the foot of a mast, `W`/`S` to climb to the top, `E` to slide down.
+- **Masts:** `E` at the foot of a mast, `W`/`S` to climb, `E` to slide down. Halfway up, `E` steps
+  onto the railed platform, where you can walk around the mast (and fight); `E` again to climb on.
 - **The harpoon:** `E` at the bow, aim with the mouse, click to fire. It bites serpents, the
   Leviathan and other ships and ties them to you. Hold `R` or right mouse to reel in; click again to
   rip it out, which does more damage the longer it held.
