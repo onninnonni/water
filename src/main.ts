@@ -897,6 +897,19 @@ function onRip(msg: RipMsg) {
     if (me.on === msg.target) { cam.shake = Math.max(cam.shake, 0.3); toast('The harpoon tore out of our hull!', 2); }
   }
 }
+// A serpent on the line tows the ship by the bow: the bow swings toward it, and it can never
+// end up astern (the line would foul the hull), only ahead or abeam.
+const LINE_MAX_ANGLE = 1.55; // about 90° off the bow (abeam)
+function swingToLine(e: ShipEnt, end: V3, taut: number, boss: boolean, dt: number) {
+  const sh = e.ship;
+  const rel = Math.atan2(Math.sin(Math.atan2(end[1] - sh.y, end[0] - sh.x) - sh.psi), Math.cos(Math.atan2(end[1] - sh.y, end[0] - sh.x) - sh.psi));
+  if (taut > 0) {
+    const rLine = clamp(rel * 0.45, -0.3, 0.3);
+    sh.r += (rLine - sh.r) * Math.min(1, (boss ? 1.6 : 0.9) * (0.25 + 0.75 * taut) * dt);
+  }
+  const over = Math.abs(rel) - LINE_MAX_ANGLE;
+  if (over > 0) { const turn = Math.sign(rel) * over * Math.min(1, 8 * dt); sh.psi += turn; sh.r += Math.sign(rel) * 0.05 * dt; }
+}
 function updateTethers(dt: number) {
   for (const e of ships.values()) {
     const t = e.tether;
@@ -910,6 +923,7 @@ function updateTethers(dt: number) {
       if (reeling) t.len = Math.max(t.kind === 's' ? 16 : 9, t.len - 5 * dt);
       const m = t.kind === 'm' ? monsters.list.find((x) => x.id === t.target) : undefined;
       e.ship.pullToward(ends.end[0], ends.end[1], ends.tip[0], ends.tip[1], t.len, t.kind === 'm' ? (m?.boss ? 0.9 : 0.25) : 0.35, dt);
+      if (t.kind === 'm') swingToLine(e, ends.end, dist > t.len * 0.9 ? Math.min((dist - t.len * 0.9) / 10, 1) : 0, !!m?.boss, dt);
       if (dist > t.len * 2.2 + 25) { releaseTether(e, true); toast('The line snapped!', 2); }
     }
     if (t.kind === 'm' && isWorldHost()) monsters.constrain(t.target, ends.tip[0], ends.tip[1], t.len, dt);

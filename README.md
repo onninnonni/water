@@ -18,7 +18,8 @@ Live: https://onnin.no · The original 2D fluid simulator: https://pikos.org/juh
 - **Masts:** `E` at the foot of a mast, `W`/`S` to climb, `E` to slide down. Halfway up, `E` steps
   onto the railed platform, where you can walk around the mast (and fight); `E` again to climb on.
 - **The harpoon:** `E` at the bow, aim with the mouse, click to fire. It bites serpents, the
-  Leviathan and other ships and ties them to you. Hold `R` or right mouse to reel in; click again to
+  Leviathan and other ships and ties them to you. A harpooned serpent tows the ship by the bow,
+  swinging her round so it is always ahead or abeam, never astern. Hold `R` or right mouse to reel in; click again to
   rip it out, which does more damage the longer it held.
 - **Ship against ship:** cannons and harpoons hit other ships. With another ship alongside, `E` at
   the main-deck rail lays a gangplank that lashes the hulls together; `E` at its end to cross. The
