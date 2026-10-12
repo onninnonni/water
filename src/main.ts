@@ -899,6 +899,7 @@ function onRip(msg: RipMsg) {
 }
 // A serpent on the line tows the ship by the bow: the bow swings toward it, and it can never
 // end up astern (the line would foul the hull), only ahead or abeam.
+const SHIP_LINE_K = 0.9; // tow-line stiffness between ships, (m/s²) per metre of stretch
 const LINE_MAX_ANGLE = 1.55; // about 90° off the bow (abeam)
 function swingToLine(e: ShipEnt, end: V3, taut: number, boss: boolean, dt: number) {
   const sh = e.ship;
@@ -920,14 +921,19 @@ function updateTethers(dt: number) {
     if (owns(e)) {
       // Reel in while the harpooner holds the winch; the line snaps if badly overstretched.
       const reeling = (me.on === e.id && me.mode === 'harpoon' && me.reel) || [...others.values()].some((o) => o.on === e.id && o.mode === 'harpoon' && o.reel);
-      if (reeling) t.len = Math.max(t.kind === 's' ? 16 : 9, t.len - 5 * dt);
+      if (reeling) t.len = Math.max(t.kind === 's' ? 14 : 9, t.len - (t.kind === 's' ? 7 : 5) * dt);
       const m = t.kind === 'm' ? monsters.list.find((x) => x.id === t.target) : undefined;
-      e.ship.pullToward(ends.end[0], ends.end[1], ends.tip[0], ends.tip[1], t.len, t.kind === 'm' ? (m?.boss ? 0.9 : 0.25) : 0.35, dt);
+      if (t.kind === 'm') e.ship.pullToward(ends.end[0], ends.end[1], ends.tip[0], ends.tip[1], t.len, m?.boss ? 0.9 : 0.25, dt, m?.vx ?? 0, m?.vy ?? 0);
+      else {
+        // Ship to ship: each owner takes half of a stiff tow line, so the pair share the pull.
+        const o = ships.get(t.target);
+        e.ship.pullToward(ends.end[0], ends.end[1], ends.tip[0], ends.tip[1], t.len, SHIP_LINE_K, dt, o?.ship.vx ?? 0, o?.ship.vy ?? 0, 3.5, [HARPOON.x + 2, 0], 1.6);
+      }
       if (t.kind === 'm') swingToLine(e, ends.end, dist > t.len * 0.9 ? Math.min((dist - t.len * 0.9) / 10, 1) : 0, !!m?.boss, dt);
       if (dist > t.len * 2.2 + 25) { releaseTether(e, true); toast('The line snapped!', 2); }
     }
     if (t.kind === 'm' && isWorldHost()) monsters.constrain(t.target, ends.tip[0], ends.tip[1], t.len, dt);
-    if (t.kind === 's') { const o = ships.get(t.target); if (o && owns(o)) o.ship.pullToward(ends.tip[0], ends.tip[1], ends.end[0], ends.end[1], t.len, 0.35, dt); }
+    if (t.kind === 's') { const o = ships.get(t.target); if (o && owns(o)) o.ship.pullToward(ends.tip[0], ends.tip[1], ends.end[0], ends.end[1], t.len, SHIP_LINE_K, dt, e.ship.vx, e.ship.vy, 3.5, [t.ap[0], t.ap[1]], 1.6); }
   }
   const reelingMe = me.mode === 'harpoon' && me.reel && !!onShip()?.tether;
   audio.reel(reelingMe);
@@ -944,7 +950,7 @@ function updateBoardsAndCollisions(dt: number) {
       if (!o) continue;
       const mp = b.a === e.id ? b.pa : b.pb, op = b.a === e.id ? b.pb : b.pa;
       const P = e.ship.local(mp[0], mp[1], MAIN_DECK), Q = o.ship.local(op[0], op[1], MAIN_DECK);
-      e.ship.pullToward(Q[0], Q[1], P[0], P[1], 7, 1.2, dt);
+      e.ship.pullToward(Q[0], Q[1], P[0], P[1], 7, 1.2, dt, o.ship.vx, o.ship.vy);
       let dpsi = Math.atan2(Math.sin(o.ship.psi - e.ship.psi), Math.cos(o.ship.psi - e.ship.psi));
       if (Math.abs(dpsi) > Math.PI / 2) dpsi -= Math.sign(dpsi) * Math.PI;
       e.ship.r += dpsi * 0.3 * dt;

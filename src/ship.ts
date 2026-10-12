@@ -291,13 +291,26 @@ export class Ship {
   }
   impulse(ix: number, iy: number, roll: number) { this.vx += ix; this.vy += iy; this.phv += roll; }
   // Pull toward a world point when a rope of length len is stretched (harpoon or gangplank lashing).
-  pullToward(px: number, py: number, fromX: number, fromY: number, len: number, k: number, dt: number) {
+  // (ovx, ovy) is the velocity of whatever is on the other end, so a line between two moving
+  // things damps how fast they separate, not this ship's own speed: one can tow the other.
+  // With a lever (the local point the line pulls on) the pull also turns the hull. Returns the
+  // pull acceleration.
+  pullToward(px: number, py: number, fromX: number, fromY: number, len: number, k: number, dt: number,
+    ovx = 0, ovy = 0, maxAcc = 6, lever: [number, number] | null = null, damp = 3) {
     const dx = px - fromX, dy = py - fromY, d = Math.hypot(dx, dy);
-    if (d <= len || d < 1e-3) return;
+    if (d <= len || d < 1e-3) return 0;
     const nx = dx / d, ny = dy / d, ex = d - len;
-    this.vx += nx * ex * k * dt; this.vy += ny * ex * k * dt;
-    const away = -(this.vx * nx + this.vy * ny);
-    if (away > 0) { this.vx += nx * away * Math.min(1, 3 * dt); this.vy += ny * away * Math.min(1, 3 * dt); }
+    const away = Math.max(0, -((this.vx - ovx) * nx + (this.vy - ovy) * ny));
+    const a = Math.min(ex * k + away * damp, maxAcc);
+    this.vx += nx * a * dt; this.vy += ny * a * dt;
+    if (lever) {
+      // Torque from the line's pull on that point: the hull swings to trail the line.
+      const c = Math.cos(this.psi), s = Math.sin(this.psi);
+      const fx = nx * c + ny * s, fy = -nx * s + ny * c; // pull direction in ship axes
+      const tq = lever[0] * fy - lever[1] * fx;
+      this.r = clamp(this.r + tq * a * 0.0016 * dt, -0.35, 0.35);
+    }
+    return a;
   }
 
   step(dt: number, windX: number, windY: number) {
