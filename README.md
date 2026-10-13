@@ -42,15 +42,6 @@ Live: https://onnin.no · The original 2D fluid simulator: https://pikos.org/juh
   whose fireballs set the sea ablaze, burning any ship (or serpent) in it. Take her wheel and set
   sail to run the drowned tunnel and breach the surface where you went down. Your old ship stays
   with her crew, or sinks if you sailed her alone.
-- **The Rogue Sea (test):** a spawn option on the start screen that drops you in an arena far from
-  the world, with swell four to five times the storm's (about 120 m significant height). Ships
-  broach and surf sideways down the faces, decks heel past 60°, crews are pitched over the rail,
-  torn from the wheel and shaken out of the rigging. There is no sailing out of it.
-- **F-15 Eagle:** pick it on the start screen and take off instead of sailing. Mouse or `W`/`A`/`S`/`D`
-  fly, `Q`/`E` rudder, `Shift` afterburner, `Ctrl` airbrake; hold click (or `Space`) for the gun and
-  right-click or `R` for a heat-seeking missile that locks onto serpents, the Leviathan or ships.
-  Hit the sea, the cliffs or a ship and you are back in the air; `J` ejects you on the masthead wings
-  to glide down onto a deck (joining that crew) or the Leviathan's head.
 - **Touch:** left thumb moves or steers, right thumb looks, buttons for everything else.
 
 ## How it works

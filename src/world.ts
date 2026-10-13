@@ -21,12 +21,6 @@ export function mix3(a: number[], b: number[], t: number): [number, number, numb
 export function stormAt(x: number, y: number) {
   return smoothstep(600, 3000, Math.hypot(x - IC.x, y - IC.y));
 }
-// The Rogue Sea: a test spawn far out of the world where the long swell is many times the storm's.
-// Only reachable by spawning there; a boundary keeps ships inside.
-export const ROGUE = { x: 0, y: -30000, R: 2600, gain: 4.5 };
-export function rogueAt(x: number, y: number) {
-  return 1 - smoothstep(ROGUE.R * 0.55, ROGUE.R * 1.4, Math.hypot(x - ROGUE.x, y - ROGUE.y));
-}
 // 1 inside the sheltered bay, 0 outside the ring.
 export function bayAt(x: number, y: number) {
   return 1 - smoothstep(IC.R - 140, IC.R - 30, Math.hypot(x - IC.x, y - IC.y));

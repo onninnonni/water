@@ -2,7 +2,7 @@
 import { MeshBuilder, V3 } from './mesh';
 import { sampleWater, newSample } from './waves';
 import { terrainHeight, PILLARS } from './island';
-import { clamp, smoothstep, WIND_DIR, rogueAt, ROGUE } from './world';
+import { clamp, smoothstep, WIND_DIR } from './world';
 
 export const STERN = -18, BOW = 18;
 export const MAIN_DECK = 4.0, QUARTER_DECK = 6.5, FORE_DECK = 5.5;
@@ -350,17 +350,13 @@ export class Ship {
     this.u = u;
     const thrust = Math.max(this.sailSet - 0.08, 0) / 0.92 * eff * this.power;
     const fu = thrust - 0.02 * u - 0.012 * u * Math.abs(u);
-    // In the Rogue Sea the keel loses its grip: she slides sideways down the faces.
-    const rg = rogueAt(this.x, this.y);
-    const fv = (-1.0 * v - 0.2 * v * Math.abs(v)) * (1 - 0.7 * rg);
+    const fv = -1.0 * v - 0.2 * v * Math.abs(v);
     const ax = fx * fu + lx * fv - 9.81 * 0.8 * gx + windX * 0.002;
     const ay = fy * fu + ly * fv - 9.81 * 0.8 * gy + windY * 0.002;
     this.vx += ax * dt; this.vy += ay * dt;
 
     const auth = 0.012 + 0.06 * clamp(Math.abs(u) / 6, 0, 1);
     const rT = this.rudder * auth * (u < -0.3 ? -1 : 1);
-    // Broaching: steep seas twist the hull broadside to the crests.
-    this.r += -along * across * 1.4 * rg * dt;
     this.r += ((rT - this.r) * 0.7 - 0.02 * (gx * lx + gy * ly) * clamp(u / 4, -1, 1)) * dt;
     this.psi += this.r * dt;
     this.x += this.vx * dt; this.y += this.vy * dt;
@@ -374,7 +370,7 @@ export class Ship {
     this.vz += azz * dt; this.z += this.vz * dt;
     this.thv += ((thT - this.th) * 4.0 - 2.6 * this.thv) * dt; this.th = clamp(this.th + this.thv * dt, -0.6, 0.6);
     const heel = clamp(this.r * u * 0.25, -0.12, 0.12) + this.sailSet * 0.07 * Math.sin(windAng);
-    this.phv += ((phT + heel - this.ph) * 3.0 - 1.3 * this.phv) * dt; this.ph = clamp(this.ph + this.phv * dt, -0.6 - 0.5 * rg, 0.6 + 0.5 * rg);
+    this.phv += ((phT + heel - this.ph) * 3.0 - 1.3 * this.phv) * dt; this.ph = clamp(this.ph + this.phv * dt, -0.6, 0.6);
 
     const bowZ = this.z + 16 * S * Math.sin(this.th), bowVz = this.vz + 16 * S * this.thv * Math.cos(this.th);
     this.imm = b.z - bowZ;
@@ -403,11 +399,6 @@ export class Ship {
       this.minVz = 0; this.peakDecel = 0;
     }
     if (this.imm > 1.2 && this.greenCd <= 0) { this.events.push({ type: 'green', i: clamp((this.imm - 1.2) / 3, 0.2, 1) }); this.greenCd = 1.2; }
-    // The Rogue Sea is a closed test arena: past its edge the sea sets you back in.
-    if (rg > 0) {
-      const ex = this.x - ROGUE.x, ey = this.y - ROGUE.y, d = Math.hypot(ex, ey), over = d - ROGUE.R * 0.55;
-      if (over > 0) { this.vx -= ex / d * over * 0.06 * dt; this.vy -= ey / d * over * 0.06 * dt; }
-    }
     this.collide(fx, fy, lx, ly);
     if (this.hull > 0 && this.hull < 100) this.hull = Math.min(100, this.hull + dt * 0.4);
   }
