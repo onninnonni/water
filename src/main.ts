@@ -8,7 +8,7 @@ import {
   ShipEvent, MASTS, CANNONS, HELM, HARPOON, deckZ, moveOnDeck, halfBeam, climbX, climbTop, nestZ, moveOnNest, railPoint, hullContains, HULL_CIRCLES, MAIN_DECK,
 } from './ship';
 import { buildAvatarParts, buildWings, avatarPose, RZ, TR, AvatarParts } from './avatar';
-import { MonsterSystem, Monster, MS, segRadius, buildSegmentMesh, buildHeadMesh, BOSS_POS } from './monsters';
+import { MonsterSystem, Monster, MS, ridden, segRadius, buildSegmentMesh, buildHeadMesh, BOSS_POS } from './monsters';
 import { MeshBuilder } from './mesh';
 import { CAVE, CAVE_SHIP, buildCave, ghostify } from './cave';
 import { Net, NetMsg } from './net';
@@ -1263,6 +1263,7 @@ function tetherEnds(e: ShipEnt): { tip: V3; end: V3 } | null {
   if (!o) return null;
   return { tip, end: o.ship.local(t.ap[0], t.ap[1], t.ap[2]) };
 }
+let towToastT = -99;
 function releaseTether(e: ShipEnt, rip: boolean) {
   const t = e.tether;
   if (!t) return;
@@ -1315,7 +1316,10 @@ function updateTethers(dt: number) {
       if (reeling) t.len = Math.max(t.kind === 's' ? 14 : 9, t.len - (t.kind === 's' ? 7 : 5) * dt);
       const m = t.kind === 'm' ? monsters.list.find((x) => x.id === t.target) : undefined;
       // Reeling in on the Leviathan: the line bites harder and the ship is hauled after it like a sled.
-      if (t.kind === 'm') e.ship.pullToward(ends.end[0], ends.end[1], ends.tip[0], ends.tip[1], t.len, m?.boss ? (reeling ? 1.6 : 0.9) : (reeling ? 0.5 : 0.25), dt, m?.vx ?? 0, m?.vy ?? 0, reeling ? 8 : 6);
+      // A ridden Leviathan on the line is a team of horses: it drags the ship along at its own pace.
+      const towed = !!m && m.boss && ridden(m);
+      if (t.kind === 'm') e.ship.pullToward(ends.end[0], ends.end[1], ends.tip[0], ends.tip[1], t.len, m?.boss ? (towed ? 2.6 : reeling ? 1.6 : 0.9) : (reeling ? 0.5 : 0.25), dt, m?.vx ?? 0, m?.vy ?? 0, towed ? 18 : reeling ? 8 : 6, null, towed ? 5 : 3);
+      if (towed && Math.hypot(e.ship.vx, e.ship.vy) > 12 && time - towToastT > 20 && me.on === e.id) { towToastT = time; toast('The Leviathan has you in tow!', 2.5); }
       else {
         // Ship to ship: each owner takes half of a stiff tow line, so the pair share the pull.
         const o = ships.get(t.target);

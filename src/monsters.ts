@@ -87,6 +87,9 @@ function make(id: number, x: number, y: number, hd: number, boss: boolean): Mons
   };
 }
 
+// A rider with both hooks set is steering it (known everywhere through the snapshots).
+export const ridden = (m: Monster) => m.rider !== 0 && m.steerT < 0.6;
+
 export class MonsterSystem {
   list: Monster[] = [];
   bossCooldown = 0;
@@ -164,7 +167,7 @@ export class MonsterSystem {
         }
       } else if (m.steerT > 2) m.rider = 0;
       // A harpoon rope slows the beast.
-      if (m.held > 0) { speed *= 0.45; m.held = Math.max(0, m.held - dt); }
+      if (m.held > 0) { if (!steered) speed *= 0.45; m.held = Math.max(0, m.held - dt); } // a rider drives it on regardless
       const turn = Math.atan2(Math.sin(head - m.hd), Math.cos(head - m.hd));
       m.hd += clamp(turn, -(m.boss ? 0.6 : 0.9) * dt, (m.boss ? 0.6 : 0.9) * dt);
       m.sp += (speed - m.sp) * (1 - Math.exp(-dt));
@@ -191,7 +194,7 @@ export class MonsterSystem {
     m.held = 0.5;
     const dx = m.x - px, dy = m.y - py, d = Math.hypot(dx, dy);
     if (d > len && d > 1e-3) {
-      const k = Math.min(1, dt * (m.boss ? 0.6 : 4)); // the Leviathan outweighs the ship: it tows her
+      const k = Math.min(1, dt * (m.boss ? (ridden(m) ? 0.12 : 0.6) : 4)); // the Leviathan outweighs the ship: it tows her (all the more when ridden)
       m.x -= dx / d * (d - len) * k; m.y -= dy / d * (d - len) * k;
       // The line hauls the head round toward the ship and saps its speed.
       const toShip = Math.atan2(-dy, -dx), turn = Math.atan2(Math.sin(toShip - m.hd), Math.cos(toShip - m.hd));
@@ -225,7 +228,7 @@ export class MonsterSystem {
     return false;
   }
   pack(): number[][] {
-    return this.list.map((m) => [m.id, +m.x.toFixed(2), +m.y.toFixed(2), +m.hd.toFixed(3), +m.phase.toFixed(3), m.hp, m.st, +m.rear.toFixed(3), +m.dying.toFixed(3), +m.hurt.toFixed(2), m.boss ? 1 : 0, m.maxHp, +m.sp.toFixed(2), +m.vx.toFixed(2), +m.vy.toFixed(2), +m.dive.toFixed(3)]);
+    return this.list.map((m) => [m.id, +m.x.toFixed(2), +m.y.toFixed(2), +m.hd.toFixed(3), +m.phase.toFixed(3), m.hp, m.st, +m.rear.toFixed(3), +m.dying.toFixed(3), +m.hurt.toFixed(2), m.boss ? 1 : 0, m.maxHp, +m.sp.toFixed(2), +m.vx.toFixed(2), +m.vy.toFixed(2), +m.dive.toFixed(3), ridden(m) ? 1 : 0]);
   }
   // Other clients: dead-reckon from the world host's snapshot (taken at host time tm) and ease
   // toward it, advancing the body wave locally so motion stays smooth between 10 Hz updates.
@@ -244,6 +247,7 @@ export class MonsterSystem {
       const rate = (1.6 + sp * 0.12) / Math.sqrt(m.scale);
       m.phase += rate * dt + (r[4] + rate * age - m.phase) * k;
       m.dive = r[15] ?? 0;
+      if (r[16]) { m.rider = m.rider || 1; m.steerT = 0; } else { m.rider = 0; m.steerT = 99; }
       m.hp = r[5]; m.st = r[6] as MS; m.rear += (r[7] - m.rear) * k; m.dying = r[8]; m.hurt = r[9]; m.maxHp = r[11] ?? m.maxHp;
       pushTrail(m); layoutSegments(m, time);
       return m;
