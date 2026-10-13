@@ -1,6 +1,6 @@
 // The island: a crescent of cliffs around a sheltered bay, sea stacks across the mouth with an
 // arch, a lighthouse on the eastern horn, and channel buoys leading out into the storm.
-import { IC, clamp, smoothstep } from './world';
+import { IC, EYE, clamp, smoothstep } from './world';
 import { MeshBuilder, V3 } from './mesh';
 
 // ---- Noise (deterministic, shared by mesh, collision and baked maps) ----
@@ -25,7 +25,20 @@ export function fbm(x: number, y: number, oct = 4) {
 const GAP_ANG = -Math.PI / 2, GAP_HALF = 0.62;
 
 // Terrain height (m, sea level 0). Outer side drops in cliffs, inner side slopes to beaches.
+// The dune island in the Eye: a low hump of sand with a gentle beach all round (ships can run
+// aground on it), dune ripples, and the pirates' sand glowing on its crown.
+export function eyeIslandHeight(x: number, y: number) {
+  const r = Math.hypot(x - EYE.x, y - EYE.y);
+  if (r > 420) return -40;
+  const n = fbm(x * 0.008 + 40, y * 0.008 - 13, 3);
+  const body = smoothstep(EYE.island + 60, 40, r + n * 14);
+  const dunes = (2.6 * Math.sin(x * 0.045 + y * 0.025 + n * 3) + 1.4 * Math.sin(y * 0.07 - x * 0.02)) * smoothstep(EYE.island - 20, EYE.island - 110, r);
+  return -16 + 34 * body + dunes;
+}
+export const nearEye = (x: number, y: number) => Math.hypot(x - EYE.x, y - EYE.y) < 420;
+
 export function terrainHeight(x: number, y: number) {
+  if (nearEye(x, y)) return eyeIslandHeight(x, y);
   const dx = x - IC.x, dy = y - IC.y;
   const r = Math.hypot(dx, dy);
   const n1 = fbm(x * 0.005, y * 0.005, 4);
@@ -194,6 +207,34 @@ function addLighthouse(m: MeshBuilder) {
   m.quad([hx - 5.4, hy - 3.9, hz + 3.2], [hx + 5.4, hy - 3.9, hz + 3.2], [hx + 5.4, hy, hz + 6], [hx - 5.4, hy, hz + 6], [0.25, 0.12, 0.1]);
   m.quad([hx - 5.4, hy + 3.9, hz + 3.2], [hx + 5.4, hy + 3.9, hz + 3.2], [hx + 5.4, hy, hz + 6], [hx - 5.4, hy, hz + 6], [0.25, 0.12, 0.1]);
   m.box(hx + 1.5, hx + 3.0, hy - 3.6, hy - 3.45, hz + 0.2, hz + 1.8, [2.9, 2.6, 1.9]); // lit window
+}
+
+export function buildEyeIsland(): number[] {
+  const m = new MeshBuilder();
+  const N = 110, span = 560, x0 = EYE.x - span / 2, y0 = EYE.y - span / 2, step = span / N;
+  const H = new Float32Array((N + 1) * (N + 1));
+  for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) H[j * (N + 1) + i] = eyeIslandHeight(x0 + i * step, y0 + j * step);
+  const SAND: V3 = [0.78, 0.6, 0.36], DUNE: V3 = [0.86, 0.66, 0.38], WET: V3 = [0.42, 0.33, 0.22], DEEP: V3 = [0.2, 0.25, 0.24];
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const h = [H[j * (N + 1) + i], H[j * (N + 1) + i + 1], H[(j + 1) * (N + 1) + i + 1], H[(j + 1) * (N + 1) + i]];
+    if (Math.max(...h) < -6) continue;
+    const hc = (h[0] + h[1] + h[2] + h[3]) / 4, x = x0 + (i + 0.5) * step, y = y0 + (j + 0.5) * step;
+    const r = Math.hypot(x - EYE.x, y - EYE.y);
+    let col = hc < -1 ? DEEP : hc < 0.8 ? WET : hc < 3 ? SAND : DUNE;
+    const v = 0.9 + 0.2 * vnoise(x * 0.3, y * 0.3);
+    col = [col[0] * v, col[1] * v, col[2] * v];
+    // The pirates' sand: a glowing bloom of spice on the crown.
+    if (r < 26 + 6 * vnoise(x * 0.2, y * 0.2)) col = [2 + 0.55 * v, 2 + 0.28 * v, 2 + 0.08 * v];
+    const p = (a: number, b: number, k: number): V3 => [x0 + a * step, y0 + b * step, h[k]];
+    m.quad(p(i, j, 0), p(i + 1, j, 1), p(i + 1, j + 1, 2), p(i, j + 1, 3), col);
+  }
+  // Wind-cut rock spires along the crown.
+  for (let k = 0; k < 9; k++) {
+    const a = k * 2.399 + 0.4, rr = 70 + 60 * vnoise(k, 3);
+    const x = EYE.x + Math.cos(a) * rr, y = EYE.y + Math.sin(a) * rr, h = eyeIslandHeight(x, y);
+    m.cyl(x, y, h - 2, h + 8 + 14 * vnoise(k, 9), 3 + 2 * vnoise(k, 5), 0.8, 7, (z) => (z > 0.5 ? [0.45, 0.32, 0.22] : [0.38, 0.27, 0.19]));
+  }
+  return m.data;
 }
 
 export function buildLand(): number[] {

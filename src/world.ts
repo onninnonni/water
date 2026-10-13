@@ -1,5 +1,9 @@
 // World layout and shared helpers. Units are metres; +x east, +y north, +z up.
 export const IC = { x: 0, y: 0, R: 520 };       // island ring centre and radius
+// The Eye of the Storm: a circle of calm water and sunlight far beyond the heart of the storm,
+// with a dune island in it. The voyage there runs in rings: the eyewall (skeletons), the
+// octopus just outside the calm, then the Eye.
+export const EYE = { x: 3350, y: -5800, calm0: 650, calm1: 1100, wall: 2000, island: 230 };
 export const WIND_DIR = 35 * Math.PI / 180;      // direction the swell travels toward (NE)
 export const SUN_DIR = norm3([-0.75, 0.35, 0.16]);
 
@@ -19,7 +23,7 @@ export function mix3(a: number[], b: number[], t: number): [number, number, numb
 
 // 0 near the island, 1 out in the open storm.
 export function stormAt(x: number, y: number) {
-  return smoothstep(600, 3000, Math.hypot(x - IC.x, y - IC.y));
+  return smoothstep(600, 3000, Math.hypot(x - IC.x, y - IC.y)) * smoothstep(EYE.calm0, EYE.calm1, Math.hypot(x - EYE.x, y - EYE.y));
 }
 // 1 inside the sheltered bay, 0 outside the ring.
 export function bayAt(x: number, y: number) {

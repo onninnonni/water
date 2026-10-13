@@ -2,9 +2,10 @@
 import { MeshBuilder, V3 } from './mesh';
 import { Mat4, multiply } from './mat4';
 
-export interface AvatarParts { leg: number[]; torso: number[]; arm: number[]; head: number[]; sword: number[]; wings: number[]; hook: number[]; }
-export function buildAvatarParts(coat: V3): AvatarParts {
-  const SKIN: V3 = [0.72, 0.52, 0.4], BOOT: V3 = [0.07, 0.05, 0.04], PANTS: V3 = [0.32, 0.28, 0.22];
+export interface AvatarParts { leg: number[]; torso: number[]; arm: number[]; head: number[]; sword: number[]; wings: number[]; hook: number[]; flask: number[]; }
+// bones: a drowned skeleton pirate (bone-white skin, rags for clothes, dark eye sockets).
+export function buildAvatarParts(coat: V3, bones = false): AvatarParts {
+  const SKIN: V3 = bones ? [0.86, 0.83, 0.72] : [0.72, 0.52, 0.4], BOOT: V3 = bones ? [0.8, 0.77, 0.66] : [0.07, 0.05, 0.04], PANTS: V3 = bones ? [0.24, 0.22, 0.18] : [0.32, 0.28, 0.22];
   const leg = new MeshBuilder();
   leg.box(-0.09, 0.09, -0.08, 0.08, -0.62, 0, PANTS);
   leg.box(-0.1, 0.16, -0.09, 0.09, -0.95, -0.62, BOOT);
@@ -26,7 +27,17 @@ export function buildAvatarParts(coat: V3): AvatarParts {
   sword.box(-0.03, 0.03, -0.03, 0.03, -0.06, 0.06, [0.2, 0.12, 0.06]);
   sword.box(0.02, 0.05, -0.09, 0.09, -0.02, 0.02, [0.6, 0.5, 0.2]);
   sword.quad([0.05, 0, -0.025], [0.85, 0, -0.03], [0.9, 0, 0.02], [0.05, 0, 0.035], [0.78, 0.8, 0.84]);
-  return { leg: leg.data, torso: torso.data, arm: arm.data, head: head.data, sword: sword.data, wings: buildWings(true), hook: buildHook() };
+  if (bones) {
+    // Ribs showing through the rags, and hollow glowing eyes.
+    for (let k = 0; k < 4; k++) torso.box(0.15, 0.17, -0.2, 0.2, 1.1 + k * 0.1, 1.14 + k * 0.1, SKIN);
+    head.box(0.12, 0.135, -0.09, -0.01, 1.68, 1.76, [2.3, 2.9, 2.5]);
+    head.box(0.12, 0.135, 0.01, 0.09, 1.68, 1.76, [2.3, 2.9, 2.5]);
+  }
+  // A flask of poison, held by the neck.
+  const flask = new MeshBuilder();
+  flask.sphere([0, 0, -0.12], 0.11, 0.11, 0.12, 8, [2.2, 2.85, 2.25]);
+  flask.tube([0, 0, -0.02], [0, 0, 0.08], 0.035, 0.035, 5, [0.3, 0.2, 0.12]);
+  return { leg: leg.data, torso: torso.data, arm: arm.data, head: head.data, sword: sword.data, wings: buildWings(true), hook: buildHook(), flask: flask.data };
 }
 
 // Elytra-style wings: a pair of ribbed canvas membranes. Open: spread out to the sides from the
@@ -70,6 +81,7 @@ export interface Anim {
   down: number;    // 0..1 knocked down
   sword: boolean;
   glide?: number;  // 0..1 flying prone with wings out
+  carry?: boolean; // holding a flask of poison out in front
   ride?: number;   // 0..1 crouched on the Leviathan, a hook in each hand
 }
 // Returns [part, matrix] pairs; base = ship model * T(feet) * RZ(yaw).
@@ -108,8 +120,10 @@ export function avatarPose(base: Mat4, a: Anim): [keyof AvatarParts, Mat4][] {
   out.push(['head', M(b, T(0, 0, 1.58), RY(-a.look * 0.6), T(0, 0, -1.58))]);
   const hold = a.hold;
   // Left arm.
-  const leftA = a.climb ? -2.6 + climbSwing * 0.5 : swing * (1 - hold) - hold * 1.25;
-  out.push(['arm', M(b, T(0, 0.33, 1.5), RY(leftA))]);
+  const leftA = a.carry ? -1.1 : a.climb ? -2.6 + climbSwing * 0.5 : swing * (1 - hold) - hold * 1.25;
+  const leftArm = M(b, T(0, 0.33, 1.5), RY(leftA));
+  out.push(['arm', leftArm]);
+  if (a.carry) out.push(['flask', M(leftArm, T(0, 0, -0.66))]);
   // Right arm: wave, climb, a cutlass swing, or swinging at the side.
   let right: Mat4;
   if (a.wave > 0) right = M(b, T(0, -0.33, 1.5), RX(a.wave * (2.7 + Math.sin(a.time * 9) * 0.35)));

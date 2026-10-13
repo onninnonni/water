@@ -1,7 +1,7 @@
 // A 40 m pirate ship. Local frame: x forward, y to port (left), z up, z = 0 at the waterline.
 import { MeshBuilder, V3 } from './mesh';
 import { sampleWater, newSample } from './waves';
-import { terrainHeight, PILLARS } from './island';
+import { terrainHeight, PILLARS, nearEye } from './island';
 import { clamp, smoothstep, WIND_DIR } from './world';
 
 export const STERN = -18, BOW = 18;
@@ -85,6 +85,17 @@ const WOOD_DARK: V3 = [0.22, 0.14, 0.08], OCHRE: V3 = [0.48, 0.34, 0.13], WALE: 
 const HULL: V3 = [0.27, 0.17, 0.1], TAR: V3 = [0.1, 0.08, 0.06], CAP: V3 = [0.34, 0.23, 0.13];
 const INNER: V3 = [0.38, 0.28, 0.18], PLANK: V3 = [0.42, 0.33, 0.22], ROPE: V3 = [0.12, 0.1, 0.08], MAST: V3 = [0.3, 0.2, 0.12];
 
+// The cabin under the quarterdeck (and the steering wheel): doors either side of the stairs, and
+// chests of poison against the Great Octopus at the back.
+export const CABIN = { x0: -17.0, x1: -11.35, doorY: 2.75, doorW: 0.55, doorH: 2.1, chestX: -16.1, chestY: 2.6 };
+export function moveInCabin(x: number, y: number, dx: number, dy: number): [number, number] {
+  const nx = clamp(x + dx, CABIN.x0, CABIN.x1), lim = halfBeam(nx) * 0.95 - 0.8;
+  let ny = clamp(y + dy, -lim, lim);
+  // The table in the middle.
+  if (nx > -15.5 && nx < -13.1 && Math.abs(ny) < 1.0) ny = Math.sign(ny || 1) * 1.0;
+  return [nx, ny];
+}
+
 export function buildShipMesh(): number[] {
   const m = new MeshBuilder();
   const xs: number[] = [];
@@ -120,8 +131,37 @@ export function buildShipMesh(): number[] {
   for (let x = -10.5; x < 13; x += 1.6) m.box(x, x + 0.02, -halfBeam(x) * 0.9, halfBeam(x) * 0.9, MAIN_DECK, MAIN_DECK + 0.005, [0.3, 0.23, 0.15]);
   // Bulkheads and stairs up to the quarterdeck and forecastle.
   const qw = halfBeam(-11) * 0.95 - 0.3, fw = halfBeam(13.5) * 0.95 - 0.3;
-  m.quad([-11, 1.6, MAIN_DECK], [-11, qw, MAIN_DECK], [-11, qw, QUARTER_DECK], [-11, 1.6, QUARTER_DECK], INNER);
-  m.quad([-11, -1.6, MAIN_DECK], [-11, -qw, MAIN_DECK], [-11, -qw, QUARTER_DECK], [-11, -1.6, QUARTER_DECK], INNER);
+  // The bulkhead under the quarterdeck, with a door into the cabin on each side of the stairs.
+  const { doorY: dy, doorW: dw, doorH } = CABIN, DOOR: V3 = [0.24, 0.16, 0.1];
+  for (const s of [1, -1]) {
+    const a = s * (dy - dw), b = s * (dy + dw), top = MAIN_DECK + doorH;
+    m.quad([-11, s * 1.6, MAIN_DECK], [-11, a, MAIN_DECK], [-11, a, QUARTER_DECK], [-11, s * 1.6, QUARTER_DECK], INNER);
+    m.quad([-11, b, MAIN_DECK], [-11, s * qw, MAIN_DECK], [-11, s * qw, QUARTER_DECK], [-11, b, QUARTER_DECK], INNER);
+    m.quad([-11, a, top], [-11, b, top], [-11, b, QUARTER_DECK], [-11, a, QUARTER_DECK], INNER);
+    // Frame, and the door standing open into the cabin.
+    m.box(-11.08, -10.92, a - 0.06 * s, a + 0.06 * s, MAIN_DECK, top + 0.08, DOOR);
+    m.box(-11.08, -10.92, b - 0.06 * s, b + 0.06 * s, MAIN_DECK, top + 0.08, DOOR);
+    m.box(-11.08, -10.92, a, b, top, top + 0.1, DOOR);
+    m.box(-11.95, -11.1, b - 0.05 * s, b + 0.0, MAIN_DECK + 0.02, top - 0.04, DOOR);
+  }
+  // The cabin: floor, panelled sides, a table, lamplight and the poison chests.
+  platform(STERN + 0.8, -11, MAIN_DECK);
+  for (let x = STERN + 0.8; x < -11; x += 0.5) for (const s of [1, -1]) {
+    const wa = halfBeam(x) * 0.95 - 0.3, wb = halfBeam(Math.min(x + 0.5, -11)) * 0.95 - 0.3;
+    m.quad([x, s * wa, MAIN_DECK], [x + 0.5, s * wb, MAIN_DECK], [x + 0.5, s * wb, QUARTER_DECK], [x, s * wa, QUARTER_DECK], INNER);
+  }
+  m.box(-15.2, -13.4, -0.7, 0.7, MAIN_DECK + 0.75, MAIN_DECK + 0.85, DOOR);
+  for (const [lx, ly] of [[-15, -0.5], [-15, 0.5], [-13.6, -0.5], [-13.6, 0.5]]) m.box(lx - 0.05, lx + 0.05, ly - 0.05, ly + 0.05, MAIN_DECK, MAIN_DECK + 0.75, DOOR);
+  m.box(-14.4, -14.2, -0.1, 0.1, QUARTER_DECK - 0.7, QUARTER_DECK - 0.4, [2.9, 2.5, 1.9]);
+  for (const s of [1, -1]) {
+    const cy = s * CABIN.chestY;
+    m.box(CABIN.chestX - 0.6, CABIN.chestX + 0.6, cy - 0.45, cy + 0.45, MAIN_DECK, MAIN_DECK + 0.7, [0.3, 0.2, 0.11], [0.22, 0.15, 0.08]);
+    for (let k = 0; k < 5; k++) {
+      const bx = CABIN.chestX - 0.45 + k * 0.22;
+      m.tube([bx, cy, MAIN_DECK + 0.7], [bx, cy, MAIN_DECK + 0.98], 0.08, 0.08, 6, [2.25, 2.85, 2.3], true);
+      m.tube([bx, cy, MAIN_DECK + 0.98], [bx, cy, MAIN_DECK + 1.08], 0.03, 0.03, 4, [0.3, 0.2, 0.12]);
+    }
+  }
   m.quad([13.5, 1.4, MAIN_DECK], [13.5, fw, MAIN_DECK], [13.5, fw, FORE_DECK], [13.5, 1.4, FORE_DECK], INNER);
   m.quad([13.5, -1.4, MAIN_DECK], [13.5, -fw, MAIN_DECK], [13.5, -fw, FORE_DECK], [13.5, -1.4, FORE_DECK], INNER);
   for (let i = 0; i < 6; i++) m.box(-9 - (i + 1) * 2 / 6, -9 - i * 2 / 6, -1.5, 1.5, MAIN_DECK, MAIN_DECK + (i + 1) * 2.5 / 6, PLANK, [0.46, 0.36, 0.24]);
@@ -279,7 +319,7 @@ export function shipAxes(psi: number, th: number, ph: number) {
 
 // A splash-down needs a plunge faster than SPLASH_VZ m/s stopped harder than SPLASH_DECEL m/s².
 export const SPLASH_VZ = 5.5, SPLASH_DECEL = 13;
-export interface ShipEvent { type: 'slam' | 'crash' | 'green' | 'splash'; i: number; }
+export interface ShipEvent { type: 'slam' | 'crash' | 'green' | 'splash' | 'ground'; i: number; }
 
 export class Ship {
   x = 0; y = -300; psi = -Math.PI / 2; vx = 0; vy = 0; r = 0;
@@ -288,7 +328,9 @@ export class Ship {
   u = 0; imm = 0; waterZ = 0;
   scale = 1; power = 1; // the ghost ship is a bigger, faster hull; local coordinates stay unscaled
   events: ShipEvent[] = [];
-  private slamCd = 0; private crashCd = 0; private greenCd = 0; private splashCd = 0;
+  private slamCd = 0; private crashCd = 0; private greenCd = 0; private splashCd = 0; private groundCd = 0;
+  beached = 0; // seconds since last touching sand (counts down): she's aground on the Eye's island
+  backwater = false; // poling astern off a beach
   private minVz = 0; private peakDecel = 0; private airT = 0;
   lastDrop: [number, number] = [0, 0]; // descent tracking for splash-downs
   private sm = [newSample(), newSample(), newSample(), newSample(), newSample()];
@@ -399,18 +441,44 @@ export class Ship {
       this.minVz = 0; this.peakDecel = 0;
     }
     if (this.imm > 1.2 && this.greenCd <= 0) { this.events.push({ type: 'green', i: clamp((this.imm - 1.2) / 3, 0.2, 1) }); this.greenCd = 1.2; }
-    this.collide(fx, fy, lx, ly);
+    // Poling her off the sand when the helm calls for astern.
+    if (this.backwater && this.beached > 0) { this.vx -= fx * 1.4 * dt; this.vy -= fy * 1.4 * dt; }
+    this.beached = Math.max(0, this.beached - dt);
+    this.collide(fx, fy, lx, ly, dt);
     if (this.hull > 0 && this.hull < 100) this.hull = Math.min(100, this.hull + dt * 0.4);
   }
 
-  private collide(fx: number, fy: number, lx: number, ly: number) {
+  private collide(fx: number, fy: number, lx: number, ly: number, dt: number) {
     let impact = 0;
     const S = this.scale;
+    this.groundCd -= dt;
     for (const [qx, qy] of [[17, 0], [8, 4.5], [8, -4.5], [-8, 4.8], [-8, -4.8], [-17, 3.5], [-17, -3.5]]) {
       const px = qx * S, py = qy * S;
       const wx = this.x + fx * px + lx * py, wy = this.y + fy * px + ly * py;
       const H = terrainHeight(wx, wy);
       if (H <= -3.8 * S) continue;
+      if (nearEye(wx, wy)) {
+        // Sand, not rock: the keel ploughs in. Heavy friction and a judder instead of a bounce,
+        // the bow riding up the beach.
+        const pen = H + 3.8 * S, speed = Math.hypot(this.vx, this.vy);
+        const f = Math.exp(-dt * (0.25 + pen * 0.55));
+        this.vx *= f; this.vy *= f; this.r *= f;
+        if (pen > 4.2 * S) {
+          // Bow up at the waterline: she's hard aground and goes no further, whatever the sails say.
+          const e = 2, gx = (terrainHeight(wx + e, wy) - terrainHeight(wx - e, wy)) / (2 * e), gy = (terrainHeight(wx, wy + e) - terrainHeight(wx, wy - e)) / (2 * e), gl = Math.hypot(gx, gy) || 1;
+          const nx = gx / gl, ny = gy / gl, up = this.vx * nx + this.vy * ny;
+          if (up > 0) { this.vx -= nx * up; this.vy -= ny * up; }
+          this.x -= nx * (pen - 4.2 * S) * 2 * dt; this.y -= ny * (pen - 4.2 * S) * 2 * dt;
+        }
+        if (speed > 0.3) {
+          const j = Math.min(speed, 7);
+          this.thv += (Math.random() - 0.5) * 0.9 * j * dt; this.phv += (Math.random() - 0.5) * 0.7 * j * dt; this.vz += (Math.random() - 0.5) * 2.5 * j * dt;
+        }
+        if (qx > 0) this.thv += pen * 0.12 * dt;
+        this.beached = 1.5;
+        if (this.groundCd <= 0 && speed > 0.8) { this.events.push({ type: 'ground', i: clamp(speed / 7, 0.2, 1) }); this.groundCd = 0.45; }
+        continue;
+      }
       const e = 2;
       const gx = (terrainHeight(wx + e, wy) - terrainHeight(wx - e, wy)) / (2 * e);
       const gy = (terrainHeight(wx, wy + e) - terrainHeight(wx, wy - e)) / (2 * e);

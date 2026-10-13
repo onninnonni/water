@@ -35,6 +35,7 @@ export class SeaAudio {
   private boss = 0; private bossTarget = 0;
   private nextBeat = 0; private beat = 0; private nextChoir = 0; private nextBrass = 0;
   private reelG: GainNode | null = null; private reelF: BiquadFilterNode | null = null;
+  private vis: { g: GainNode; o: OscillatorNode[]; lfo: OscillatorNode; nf: BiquadFilterNode; ng: GainNode; kind: number } | null = null;
   muted = false;
 
   get started() { return this.ctx !== null; }
@@ -393,6 +394,31 @@ export class SeaAudio {
     this.burst(this.brown, 'lowpass', 180, 1, 0.8 * v, 0.005, 0.5);
   }
   // Ratcheting winch while reeling the harpoon line in.
+// The pirates' sand: a vast slow chord that breathes, with whispering air over it. Each vision
+  // has its own harmony: a burning minor, a bottomless drone, and a sour, shifting cluster.
+  setVision(level: number, kind: number) {
+    if (!this.ctx) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const CHORDS = [[55, 82.41, 110, 130.81, 164.81], [27.5, 41.2, 55, 82.41, 123.47], [61.74, 65.41, 92.5, 98, 138.59]];
+    if (!this.vis) {
+      const g = ctx.createGain(); g.gain.value = 0; g.connect(this.master); g.connect(this.revIn);
+      const lfo = ctx.createOscillator(); lfo.frequency.value = 0.13; const lg = ctx.createGain(); lg.gain.value = 0.35; lfo.connect(lg);
+      const o = CHORDS[0].map((f, i) => {
+        const osc = ctx.createOscillator(); osc.type = i % 2 ? 'triangle' : 'sine'; osc.frequency.value = f; osc.detune.value = (i - 2) * 7;
+        const og = ctx.createGain(); og.gain.value = 0.18; lg.connect(og.gain); osc.connect(og); og.connect(g); osc.start();
+        return osc;
+      });
+      const n = ctx.createBufferSource(); n.buffer = this.white; n.loop = true;
+      const nf = ctx.createBiquadFilter(); nf.type = 'bandpass'; nf.frequency.value = 1200; nf.Q.value = 6;
+      const ng = ctx.createGain(); ng.gain.value = 0; n.connect(nf); nf.connect(ng); ng.connect(g); n.start(); lfo.start();
+      this.vis = { g, o, lfo, nf, ng, kind: -1 };
+    }
+    const v = this.vis;
+    if (v.kind !== kind) { v.kind = kind; v.o.forEach((osc, i) => osc.frequency.setTargetAtTime(CHORDS[kind][i], t, 1.5)); }
+    v.g.gain.setTargetAtTime(level * 0.55, t, 0.8);
+    v.ng.gain.setTargetAtTime(level * 0.12, t, 0.5);
+    v.nf.frequency.setTargetAtTime(700 + 1600 * (0.5 + 0.5 * Math.sin(t * 0.7)), t, 0.4);
+  }
   reel(on: boolean) {
     if (!this.ctx) return;
     if (!this.reelG) {

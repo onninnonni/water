@@ -107,6 +107,25 @@
     #hurt { position: fixed; inset: 0; pointer-events: none; opacity: 0;
       background: radial-gradient(ellipse at center, rgba(150,0,0,0) 40%, rgba(150,0,0,0.75) 100%); }
     #reelT, #cutT, #jumpT, #diveT { display: none; }
+    #voyage { position: absolute; top: calc(96px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); width: min(380px, 66vw);
+      display: none; text-align: center; text-shadow: 0 1px 8px rgba(0,0,0,0.9); }
+    #voyageName { font-size: 11px; letter-spacing: 0.32em; text-transform: uppercase; color: #f4e2a1; padding-left: 0.32em; }
+    #voyageBar { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.14); margin-top: 4px; overflow: hidden; }
+    #voyageFill { height: 100%; width: 0; background: linear-gradient(90deg, #e0624a, #e9b44c 55%, #f4e2a1); transition: width 0.5s; }
+    body.cave #voyage { display: none !important; }
+    /* The pirates' sand: the vision overlay and the words that drift through it. */
+    #vision { position: fixed; inset: 0; pointer-events: none; opacity: 0; overflow: hidden; mix-blend-mode: screen; }
+    #vision.v0 { background: radial-gradient(ellipse at 50% 60%, rgba(255,120,30,0) 30%, rgba(255,90,20,0.35) 100%); }
+    #vision.v1 { background: radial-gradient(ellipse at 50% 45%, rgba(40,90,255,0) 25%, rgba(30,70,255,0.45) 100%); }
+    #vision.v2 { background: conic-gradient(from 0deg, rgba(255,0,150,0.18), rgba(0,255,200,0.18), rgba(255,220,0,0.18), rgba(120,0,255,0.18), rgba(255,0,150,0.18)); animation: spinv 6s linear infinite; }
+    @keyframes spinv { to { filter: hue-rotate(360deg); } }
+    #visionTitle { position: absolute; top: 30%; width: 100%; text-align: center; font: 300 clamp(26px, 5vw, 56px) Georgia, serif; letter-spacing: 0.35em;
+      text-transform: uppercase; color: #fff4dc; text-shadow: 0 0 30px rgba(255,200,120,0.9); padding-left: 0.35em; opacity: 0; }
+    .vword { position: absolute; font-family: Georgia, serif; font-style: italic; color: #fff2d6; white-space: nowrap; opacity: 0;
+      text-shadow: 0 0 18px rgba(255,190,120,0.95), 0 0 2px #000; animation: vword 5s ease-in-out forwards; }
+    #vision.v1 .vword { color: #dbe8ff; text-shadow: 0 0 18px rgba(110,160,255,0.95), 0 0 2px #000; }
+    @keyframes vword { 0% { opacity: 0; filter: blur(8px); transform: translate(-30px, 10px) rotate(var(--rot)) scale(0.9); }
+      30% { opacity: 1; filter: blur(0); } 70% { opacity: 0.9; } 100% { opacity: 0; filter: blur(10px); transform: translate(40px, -20px) rotate(var(--rot)) scale(1.15); } }
     body.cave #compass, body.cave #minimap { display: none; }
     /* Going down into the deep (and back up): dark water, rushing bubbles. */
     #deep { position: fixed; inset: 0; pointer-events: none; display: none; opacity: 0; align-items: center; justify-content: center;
@@ -151,6 +170,7 @@
   <div id="vignette"></div>
   <div id="hurt"></div>
   <div id="drench"></div>
+  <div id="vision"><div id="visionTitle"></div></div>
   <div id="deep"><div id="deepText">Down… into the deep</div></div>
 
   <div id="hud">
@@ -178,6 +198,7 @@
       <button id="muteBtn" title="Sound on/off (M)">Mute</button>
       <button id="fsBtn" title="Fullscreen">⛶</button>
     </div>
+    <div id="voyage"><div id="voyageName"></div><div id="voyageBar"><div id="voyageFill"></div></div></div>
     <div id="boss"><div class="name">The Leviathan</div><div id="bossbar"><div id="bossfill"></div></div></div>
     <div id="prompt"></div>
     <div id="toast"></div>

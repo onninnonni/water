@@ -40,7 +40,7 @@ const WAVES_GLSL = `
 uniform vec4 uWA[NW];
 uniform vec4 uWB[NW];
 uniform vec3 uIsland;
-float stormAt(vec2 p){ return smoothstep(600.0, 3000.0, length(p - uIsland.xy)); }
+float stormAt(vec2 p){ return smoothstep(600.0, 3000.0, length(p - uIsland.xy)) * smoothstep(650.0, 1100.0, length(p - vec2(3350.0, -5800.0))); } // EYE in world.ts
 float bayAt(vec2 p){ return 1.0 - smoothstep(uIsland.z - 140.0, uIsland.z - 30.0, length(p - uIsland.xy)); }
 `;
 
@@ -103,6 +103,7 @@ precision highp float;
 in vec3 aGrid; // offset x, offset y, local grid spacing
 uniform mat4 uVP;
 uniform vec2 uCenter;
+uniform float uAmpBoost; // swell multiplier (1 normally; the pirates' sand visions change it)
 ` + WAVES_GLSL + `
 out vec3 vPos;
 out vec3 vN;
@@ -113,7 +114,7 @@ void main(){
   vec2 p0 = uCenter + aGrid.xy;
   float sp = aGrid.z;
   float s = stormAt(p0), bay = bayAt(p0);
-  float ml = 0.04 + 1.6*s, ms = (0.22 + 0.78*s)*(1.0 - 0.55*bay);
+  float ml = (0.04 + 1.6*s)*uAmpBoost, ms = (0.22 + 0.78*s)*(1.0 - 0.55*bay)*(0.5 + 0.5*uAmpBoost);
   vec3 D = vec3(0.0); vec3 N = vec3(0.0, 0.0, 1.0); float crest = 0.0;
   for (int i = 0; i < NW; i++){
     vec4 A = uWA[i], B = uWB[i];

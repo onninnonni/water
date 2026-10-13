@@ -42,6 +42,18 @@ Live: https://onnin.no · The original 2D fluid simulator: https://pikos.org/juh
   whose fireballs set the sea ablaze, burning any ship (or serpent) in it. Take her wheel and set
   sail to run the drowned tunnel and breach the surface where you went down. Your old ship stays
   with her crew, or sinks if you sailed her alone.
+- **The voyage to the Eye:** far beyond the heart of the storm lies the Eye of the Storm, a circle
+  of calm sunlit water with a dune island (gold ring and route on the map, tracker under the
+  compass). Sailing there from the heart: first the Leviathan's waters; then the eyewall, where
+  skeleton pirates climb up the hull out of the sea and attack the crew (cut them down); then, at
+  the edge of the calm, the Great Octopus clamps onto the ship and holds her fast. Fetch poison from
+  the cabin under the steering wheel (doors either side of the quarterdeck stairs) and pour it on
+  its tentacles five times until it lets go.
+- **The island:** run the ship up the beach (she grinds to a halt; `W`/`S` at the wheel with sails
+  furled poles her off again), jump down from the bow and wade ashore. On the island's crown glows
+  the pirates' sand: taste it (`E`) for one of three visions of the future (the Burning Armada,
+  the Worm Ascendant, Fractured Futures).
+- **A ridden Leviathan on the harpoon line** tows the ship at up to ~17 m/s.
 - **Touch:** left thumb moves or steers, right thumb looks, buttons for everything else.
 
 ## How it works
